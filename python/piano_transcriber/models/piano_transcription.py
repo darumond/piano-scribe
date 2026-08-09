@@ -69,7 +69,7 @@ OFFICIAL_CHECKPOINT = CheckpointSpec(
 
 def default_model_cache_dir() -> Path:
     """Return a platform-appropriate, overrideable model cache directory."""
-    override = os.environ.get("PIANO_TRANSCRIBER_CACHE_DIR")
+    override = os.environ.get("PIANO_SCRIBE_CACHE_DIR")
     if override:
         return Path(override).expanduser() / "models"
     if os.name == "nt":
@@ -78,7 +78,7 @@ def default_model_cache_dir() -> Path:
         root = Path.home() / "Library" / "Caches"
     else:
         root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    return root / "piano-transcriber" / "models"
+    return root / "piano-scribe" / "models"
 
 
 def _fetch_checkpoint(url: str, destination: Path) -> None:

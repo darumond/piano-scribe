@@ -27,7 +27,7 @@ class BasicPitchModel(TranscriptionModel):
                 'Basic Pitch is optional. Install it with: pip install -e ".[basic-pitch]"'
             ) from error
 
-        with tempfile.TemporaryDirectory(prefix="piano-transcriber-") as directory:
+        with tempfile.TemporaryDirectory(prefix="piano-scribe-") as directory:
             audio_path = Path(directory) / "input.wav"
             sf.write(audio_path, audio, sample_rate)
             _model_output, _midi_data, raw_notes = predict(str(audio_path))

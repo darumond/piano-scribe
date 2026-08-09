@@ -18,7 +18,8 @@ def test_transcribe_requires_output(synthetic_wav: Path) -> None:
 
 
 def test_transcribe_parser_accepts_piano_runtime_options() -> None:
-    args = _parser().parse_args(
+    parser = _parser()
+    args = parser.parse_args(
         [
             "transcribe",
             "piano.wav",
@@ -32,6 +33,7 @@ def test_transcribe_parser_accepts_piano_runtime_options() -> None:
             "piano.mid",
         ]
     )
+    assert parser.prog == "piano-scribe"
     assert args.model == "piano-transcription"
     assert args.device == "cpu"
     assert args.checkpoint == Path("weights/model.pth")

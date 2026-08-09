@@ -1,6 +1,6 @@
-# Piano Transcriber
+# PianoScribe
 
-Piano Transcriber is a production-oriented foundation for automatic piano music transcription. It
+PianoScribe is a production-oriented foundation for automatic piano music transcription. It
 loads WAV or MP3 audio, prepares a mono signal, delegates note inference to a replaceable backend,
 and exports normalized note events as MIDI and MusicXML. Optional pretrained-model adapters never
 download weights during setup or automated tests.
@@ -65,11 +65,11 @@ By default, the first real transcription downloads the official 171,966,578-byte
 validated against the size and MD5 checksum published by Zenodo. Subsequent runs reuse it from the
 platform cache:
 
-- Linux: `${XDG_CACHE_HOME:-~/.cache}/piano-transcriber/models/`
-- macOS: `~/Library/Caches/piano-transcriber/models/`
-- Windows: `%LOCALAPPDATA%\piano-transcriber\models\`
+- Linux: `${XDG_CACHE_HOME:-~/.cache}/piano-scribe/models/`
+- macOS: `~/Library/Caches/piano-scribe/models/`
+- Windows: `%LOCALAPPDATA%\piano-scribe\models\`
 
-Set `PIANO_TRANSCRIBER_CACHE_DIR` to override the cache root. To prevent any download, pass an
+Set `PIANO_SCRIBE_CACHE_DIR` to override the cache root. To prevent any download, pass an
 existing checkpoint explicitly with `--checkpoint /path/to/model.pth`.
 
 `--device auto` uses CUDA when `torch.cuda.is_available()` is true and otherwise uses CPU. Use
@@ -87,7 +87,7 @@ OS, PyTorch build, and audio workload before production deployment.
 Transcribe a file using the offline deterministic backend:
 
 ```bash
-piano-transcriber transcribe input.wav --model mock --midi output.mid \
+piano-scribe transcribe input.wav --model mock --midi output.mid \
   --musicxml output.musicxml
 ```
 
@@ -97,7 +97,7 @@ dependencies produce a concise install hint and a non-zero exit code.
 Manually run the real piano backend on CPU:
 
 ```bash
-piano-transcriber --verbose transcribe piano.wav \
+piano-scribe --verbose transcribe piano.wav \
   --model piano-transcription \
   --device cpu \
   --midi piano.mid \
@@ -107,7 +107,7 @@ piano-transcriber --verbose transcribe piano.wav \
 Use a local checkpoint and automatic CUDA selection when available:
 
 ```bash
-piano-transcriber --verbose transcribe piano.wav \
+piano-scribe --verbose transcribe piano.wav \
   --model piano-transcription \
   --device auto \
   --checkpoint /path/to/CRNN_note_F1=0.9677_pedal_F1=0.9186.pth \
@@ -122,7 +122,7 @@ validated by this project on a representative audio corpus.
 Inspect decoded audio:
 
 ```bash
-piano-transcriber inspect input.wav
+piano-scribe inspect input.wav
 ```
 
 The command prints sample rate, duration, channel count, RMS, and peak amplitude. Use `--verbose`

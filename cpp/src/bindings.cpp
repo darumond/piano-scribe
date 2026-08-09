@@ -32,7 +32,7 @@ py::array_t<float> as_array(const std::vector<float>& values) {
 }  // namespace
 
 PYBIND11_MODULE(_native, module) {
-    module.doc() = "Native DSP helpers for piano-transcriber";
+    module.doc() = "Native DSP helpers for PianoScribe";
     module.def("stereo_to_mono", [](const py::array_t<float, py::array::c_style |
                                                              py::array::forcecast>& samples) {
         return as_array(piano_transcriber::interleaved_to_mono(as_vector(samples), 2));

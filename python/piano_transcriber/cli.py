@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="piano-transcriber", description="Automatic piano music transcription"
+        prog="piano-scribe", description="PianoScribe automatic piano music transcription"
     )
     parser.add_argument("--verbose", action="store_true", help="enable detailed logging")
     subparsers = parser.add_subparsers(dest="command", required=True)
