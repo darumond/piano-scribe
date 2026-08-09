@@ -12,7 +12,7 @@ import numpy as np
 from piano_transcriber.audio.loader import AudioLoadError, load_audio
 from piano_transcriber.audio.preprocessing import calculate_rms
 from piano_transcriber.config import ModelName, PipelineConfig
-from piano_transcriber.models.base import MissingModelDependencyError
+from piano_transcriber.models.base import MissingModelDependencyError, ModelCheckpointError
 from piano_transcriber.transcription.pipeline import TranscriptionPipeline
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,17 @@ def _parser() -> argparse.ArgumentParser:
     transcribe.add_argument("--musicxml", type=Path, help="output MusicXML path")
     transcribe.add_argument("--sample-rate", type=int, default=16_000)
     transcribe.add_argument("--minimum-confidence", type=float, default=0.0)
+    transcribe.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="inference device for supported models (default: auto)",
+    )
+    transcribe.add_argument(
+        "--checkpoint",
+        type=Path,
+        help="explicit checkpoint path for the piano-transcription model",
+    )
     transcribe.set_defaults(handler=_run_transcribe)
 
     inspect = subparsers.add_parser("inspect", help="show audio metadata and levels")
@@ -47,6 +58,8 @@ def _run_transcribe(args: argparse.Namespace) -> int:
         model=ModelName(args.model),
         target_sample_rate=args.sample_rate,
         minimum_confidence=args.minimum_confidence,
+        checkpoint_path=args.checkpoint,
+        device=args.device,
     )
     output = TranscriptionPipeline(config).run(
         args.input, midi_path=args.midi, musicxml_path=args.musicxml
@@ -75,7 +88,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     try:
         return int(args.handler(args))
-    except (AudioLoadError, MissingModelDependencyError, ValueError, NotImplementedError) as error:
+    except (
+        AudioLoadError,
+        MissingModelDependencyError,
+        ModelCheckpointError,
+        ValueError,
+        NotImplementedError,
+    ) as error:
         logger.error("%s", error)
         return 2
 

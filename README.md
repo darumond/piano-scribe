@@ -2,16 +2,15 @@
 
 Piano Transcriber is a production-oriented foundation for automatic piano music transcription. It
 loads WAV or MP3 audio, prepares a mono signal, delegates note inference to a replaceable backend,
-and exports normalized note events as MIDI and MusicXML. Version 0.1 deliberately ships with a
-deterministic mock backend; optional pretrained-model adapters never download weights during setup
-or tests.
+and exports normalized note events as MIDI and MusicXML. Optional pretrained-model adapters never
+download weights during setup or automated tests.
 
 ## Architecture
 
 The project uses a hybrid Python/C++ design:
 
-- Python owns audio I/O, polyphase resampling/preprocessing orchestration, model adapters, domain validation,
-  postprocessing, MIDI/MusicXML output, the CLI, and tests.
+- Python owns audio I/O, polyphase resampling/preprocessing orchestration, model adapters, domain
+  validation, postprocessing, MIDI/MusicXML output, the CLI, and tests.
 - A small C++17 library owns reusable DSP primitives: interleaved-to-mono conversion, RMS, peak
   normalization, and framing. `pybind11` exposes these functions as `piano_transcriber._native`.
 - `TranscriptionModel` is the only contract the pipeline knows. Backends return an immutable
@@ -22,8 +21,8 @@ The included backends are:
 
 - `mock`: deterministic C-major notes for tests and end-to-end demonstrations.
 - `basic-pitch`: a lazy Spotify Basic Pitch adapter. Its dependency is optional.
-- `piano-transcription`: an explicit integration seam for a ByteDance-style PyTorch piano model.
-  It reports the missing runtime/configuration without fetching weights.
+- `piano-transcription`: the pretrained ByteDance high-resolution piano CRNN, including note
+  onset, offset, velocity, and sustain-pedal predictions. It supports CPU and CUDA execution.
 
 MusicXML output is intentionally basic: it creates a readable single-part piano score but does not
 yet perform beat tracking, voice allocation, or sophisticated rhythmic engraving.
@@ -55,9 +54,33 @@ python -m pip install -e ".[basic-pitch]"
 python -m pip install -e ".[pytorch]"
 ```
 
-The PyTorch extra provides a base runtime only. Install a compatible piano transcription package
-and configure its checkpoint explicitly before completing that adapter. This keeps weight choice,
-storage, and licensing visible to the operator.
+The `pytorch` extra installs PyTorch and
+[`piano-transcription-inference`](https://github.com/qiuqiangkong/piano_transcription_inference).
+It installs code only; model weights are resolved when that backend is first used.
+
+### Piano transcription checkpoint and devices
+
+By default, the first real transcription downloads the official 171,966,578-byte checkpoint from
+[Zenodo record 4034264](https://zenodo.org/records/4034264). The download is written atomically and
+validated against the size and MD5 checksum published by Zenodo. Subsequent runs reuse it from the
+platform cache:
+
+- Linux: `${XDG_CACHE_HOME:-~/.cache}/piano-transcriber/models/`
+- macOS: `~/Library/Caches/piano-transcriber/models/`
+- Windows: `%LOCALAPPDATA%\piano-transcriber\models\`
+
+Set `PIANO_TRANSCRIBER_CACHE_DIR` to override the cache root. To prevent any download, pass an
+existing checkpoint explicitly with `--checkpoint /path/to/model.pth`.
+
+`--device auto` uses CUDA when `torch.cuda.is_available()` is true and otherwise uses CPU. Use
+`--device cpu` for predictable development runs or `--device cuda` to require CUDA. CUDA is never a
+base requirement.
+
+The upstream ByteDance training repository is archived and documents Python 3.7/PyTorch 1.4. Its
+inference package 0.0.6 was published in 2025 but still describes Windows as untested. This project
+isolates that legacy API behind the adapter and never invokes its built-in `wget` downloader. The
+optional dependency range targets current PyTorch 2.x, but operators should test their specific
+OS, PyTorch build, and audio workload before production deployment.
 
 ## CLI
 
@@ -70,6 +93,31 @@ piano-transcriber transcribe input.wav --model mock --midi output.mid \
 
 Select another backend with `--model basic-pitch` or `--model piano-transcription`. Missing optional
 dependencies produce a concise install hint and a non-zero exit code.
+
+Manually run the real piano backend on CPU:
+
+```bash
+piano-transcriber --verbose transcribe piano.wav \
+  --model piano-transcription \
+  --device cpu \
+  --midi piano.mid \
+  --musicxml piano.musicxml
+```
+
+Use a local checkpoint and automatic CUDA selection when available:
+
+```bash
+piano-transcriber --verbose transcribe piano.wav \
+  --model piano-transcription \
+  --device auto \
+  --checkpoint /path/to/CRNN_note_F1=0.9677_pedal_F1=0.9186.pth \
+  --midi piano.mid \
+  --musicxml piano.musicxml
+```
+
+The model expects 16 kHz mono audio; the default pipeline preprocessing performs that conversion.
+Model loading and inference durations are logged. Real transcription quality has not yet been
+validated by this project on a representative audio corpus.
 
 Inspect decoded audio:
 
@@ -103,7 +151,8 @@ ctest --test-dir build/native --output-on-failure
 On multi-configuration generators, pass `--config Release` to the build and CTest commands.
 
 The test suite generates a small decaying C-major signal at runtime. Tests require neither network
-access, external fixtures, a GPU, nor model weights. To run the initial DSP comparison:
+access, external fixtures, a GPU, nor model weights. The real adapter is tested through injected
+runtime and checkpoint collaborators. To run the initial DSP comparison:
 
 ```bash
 python benchmarks/benchmark_dsp.py
@@ -126,8 +175,8 @@ benchmarks/                  Python/native DSP comparison scaffold
 
 ## Roadmap
 
-1. Audio → mock transcription → MIDI/MusicXML (this bootstrap).
-2. Integrate and validate a pretrained piano transcription model.
+1. Audio → mock transcription → MIDI/MusicXML.
+2. Integrate a pretrained piano transcription model and validate it on a representative corpus.
 3. Add tempo estimation and rhythm quantization.
 4. Separate left- and right-hand voices.
 5. Fine-tune on MAESTRO or another licensed piano dataset.

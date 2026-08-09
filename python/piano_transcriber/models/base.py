@@ -14,6 +14,10 @@ class MissingModelDependencyError(RuntimeError):
     """Raised when a selected optional backend has not been installed."""
 
 
+class ModelCheckpointError(RuntimeError):
+    """Raised when a model checkpoint cannot be resolved or validated."""
+
+
 class TranscriptionModel(ABC):
     @property
     @abstractmethod

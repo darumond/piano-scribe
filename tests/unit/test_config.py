@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import numpy as np
+from pathlib import Path
+
 import pytest
 from piano_transcriber.config import ModelName, PipelineConfig, create_model
-from piano_transcriber.models.base import MissingModelDependencyError
 from piano_transcriber.models.mock import MockTranscriptionModel
+from piano_transcriber.models.piano_transcription import PianoTranscriptionModel
 
 
 def test_select_mock_model() -> None:
@@ -21,7 +22,14 @@ def test_invalid_config_is_rejected() -> None:
         PipelineConfig(minimum_confidence=2.0)
 
 
-def test_missing_optional_dependency_fails_gracefully() -> None:
-    model = create_model(ModelName.PIANO_TRANSCRIPTION)
-    with pytest.raises(MissingModelDependencyError, match="optional runtime"):
-        model.transcribe(np.zeros(10, dtype=np.float32), 16_000)
+def test_select_piano_model_with_runtime_options(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model.pth"
+    model = create_model(ModelName.PIANO_TRANSCRIPTION, checkpoint_path=checkpoint, device="cpu")
+    assert isinstance(model, PianoTranscriptionModel)
+    assert model.checkpoint_path == checkpoint
+    assert model.device == "cpu"
+
+
+def test_checkpoint_is_rejected_for_unrelated_model(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="only valid"):
+        PipelineConfig(checkpoint_path=tmp_path / "model.pth")

@@ -27,7 +27,12 @@ dev = [
     "ruff>=0.5",
 ]
 basic-pitch = ["basic-pitch>=0.4"]
-pytorch = ["torch>=2.1", "librosa>=0.10"]
+pytorch = [
+    "librosa>=0.10,<1",
+    "piano-transcription-inference==0.0.6",
+    "torch>=2.2,<3",
+    "torchlibrosa>=0.1,<0.2",
+]
 
 [project.scripts]
 piano-transcriber = "piano_transcriber.cli:main"

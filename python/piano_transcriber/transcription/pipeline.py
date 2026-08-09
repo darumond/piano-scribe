@@ -32,7 +32,11 @@ class TranscriptionPipeline:
         model: TranscriptionModel | None = None,
     ) -> None:
         self.config = config or PipelineConfig()
-        self.model = model or create_model(self.config.model)
+        self.model = model or create_model(
+            self.config.model,
+            checkpoint_path=self.config.checkpoint_path,
+            device=self.config.device,
+        )
 
     def run(
         self,
