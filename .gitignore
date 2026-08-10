@@ -33,6 +33,7 @@ compile_commands.json
 # Local work and generated application output
 work/
 outputs/
+test_audio/
 *.mid
 *.midi
 *.musicxml
