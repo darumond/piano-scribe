@@ -13,4 +13,9 @@ def postprocess_result(
     notes: tuple[NoteEvent, ...] = tuple(
         sorted(note for note in result.notes if note.confidence >= minimum_confidence)
     )
-    return TranscriptionResult(notes, result.model_name, result.audio_duration_seconds)
+    return TranscriptionResult(
+        notes,
+        result.model_name,
+        result.audio_duration_seconds,
+        result.pedal_events,
+    )

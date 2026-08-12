@@ -25,7 +25,7 @@ from piano_transcriber.models.base import (
     ModelCheckpointError,
     TranscriptionModel,
 )
-from piano_transcriber.transcription.types import NoteEvent, TranscriptionResult
+from piano_transcriber.transcription.types import NoteEvent, PedalEvent, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -280,7 +280,11 @@ class PianoTranscriptionModel(TranscriptionModel):
     ) -> TranscriptionResult:
         raw_notes = self._event_sequence(raw_result, "est_note_events")
         raw_pedals = self._event_sequence(raw_result, "est_pedal_events", required=False)
-        pedals = tuple(self._pedal_interval(event) for event in raw_pedals)
+        pedals = tuple(
+            pedal
+            for event in raw_pedals
+            if (pedal := self._pedal_interval(event, duration)) is not None
+        )
         notes: list[NoteEvent] = []
         for raw_note in raw_notes:
             try:
@@ -298,7 +302,10 @@ class PianoTranscriptionModel(TranscriptionModel):
                 continue
             if offset <= onset:
                 raise ValueError(f"piano backend returned a non-positive note duration: {raw_note}")
-            pedal = any(pedal_on < offset and pedal_off > onset for pedal_on, pedal_off in pedals)
+            pedal_active = any(
+                pedal_event.onset_seconds < offset and pedal_event.offset_seconds > onset
+                for pedal_event in pedals
+            )
             notes.append(
                 NoteEvent(
                     pitch=pitch,
@@ -306,10 +313,10 @@ class PianoTranscriptionModel(TranscriptionModel):
                     offset_seconds=offset,
                     velocity=velocity,
                     confidence=confidence,
-                    pedal=pedal if pedals else None,
+                    pedal=pedal_active if pedals else None,
                 )
             )
-        return TranscriptionResult(tuple(sorted(notes)), self.name, duration)
+        return TranscriptionResult(tuple(sorted(notes)), self.name, duration, pedals)
 
     @staticmethod
     def _event_sequence(
@@ -325,7 +332,7 @@ class PianoTranscriptionModel(TranscriptionModel):
         return cast(Sequence[Mapping[str, object]], value)
 
     @staticmethod
-    def _pedal_interval(event: Mapping[str, object]) -> tuple[float, float]:
+    def _pedal_interval(event: Mapping[str, object], duration: float) -> PedalEvent | None:
         try:
             onset = PianoTranscriptionModel._number(event["onset_time"])
             offset = PianoTranscriptionModel._number(event["offset_time"])
@@ -333,7 +340,10 @@ class PianoTranscriptionModel(TranscriptionModel):
             raise ValueError(f"piano backend returned a malformed pedal event: {event}") from error
         if not math.isfinite(onset) or not math.isfinite(offset) or onset < 0.0 or offset <= onset:
             raise ValueError(f"piano backend returned a malformed pedal interval: {event}")
-        return onset, offset
+        if onset >= duration:
+            logger.debug("Discarding pedal event beyond audio duration: %s", event)
+            return None
+        return PedalEvent(onset, min(offset, duration))
 
     @staticmethod
     def _number(value: object) -> float:

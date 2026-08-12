@@ -10,7 +10,7 @@ download weights during setup or automated tests.
 The project uses a hybrid Python/C++ design:
 
 - Python owns audio I/O, polyphase resampling/preprocessing orchestration, model adapters, domain
-  validation, postprocessing, MIDI/MusicXML output, the CLI, and tests.
+  validation, symbolic score reconstruction, MIDI/MusicXML output, the CLI, and tests.
 - A small C++17 library owns reusable DSP primitives: interleaved-to-mono conversion, RMS, peak
   normalization, and framing. `pybind11` exposes these functions as `piano_transcriber._native`.
 - `TranscriptionModel` is the only contract the pipeline knows. Backends return an immutable
@@ -24,8 +24,10 @@ The included backends are:
 - `piano-transcription`: the pretrained ByteDance high-resolution piano CRNN, including note
   onset, offset, velocity, and sustain-pedal predictions. It supports CPU and CUDA execution.
 
-MusicXML output is intentionally basic: it creates a readable single-part piano score but does not
-yet perform beat tracking, voice allocation, or sophisticated rhythmic engraving.
+Raw MusicXML output remains available when no tempo is supplied. When score reconstruction is
+enabled, acoustic events are converted to exact quarter-note units, quantized, grouped into chords,
+and written into measures with conventional note values. The first reconstruction layer does not
+yet perform robust beat tracking, voice allocation, staff separation, or sophisticated engraving.
 
 ## Requirements and installation
 
@@ -104,6 +106,47 @@ piano-scribe --verbose transcribe piano.wav \
   --musicxml piano.musicxml
 ```
 
+Reconstruct rhythm at an authoritative tempo while transcribing:
+
+```bash
+piano-scribe transcribe piano.wav \
+  --model piano-transcription \
+  --device cpu \
+  --bpm 60 \
+  --time-signature 4/4 \
+  --quantization sixteenth \
+  --midi piano.mid \
+  --musicxml piano.musicxml \
+  --diagnostics-json score-diagnostics.json \
+  --diagnostics-tsv score-notes.tsv
+```
+
+`--bpm` is authoritative. `--estimate-bpm` selects a deliberately small onset-interval baseline;
+dense polyphonic passages can make that estimate ambiguous. Supported grids are `quarter`,
+`eighth`, `eighth-triplet`, `sixteenth`, `sixteenth-triplet`, and `thirty-second`.
+
+Very short acoustic events are retained by default and receive a suspicious-event diagnostic.
+Use `--min-note-duration-ms 30` to opt into filtering; every filtered or merged event remains in the
+JSON/TSV diagnostics. The current pedal heuristic prevents a pedal-overlapped acoustic offset from
+automatically becoming a written duration by capping it at the next quantized onset. Both raw times
+and the shortening decision remain observable.
+
+An existing normalized transcription JSON can be reconstructed without rerunning a model:
+
+```bash
+piano-scribe analyze-score transcription.json \
+  --bpm 60 \
+  --time-signature 4/4 \
+  --quantization sixteenth-triplet \
+  --midi score.mid \
+  --musicxml score.musicxml \
+  --diagnostics-json diagnostics.json \
+  --diagnostics-tsv notes.tsv
+```
+
+The diagnostics report raw and quantized onsets, timing error, raw and written durations, measure
+position, chord size, suspicious classifications, filtering, merging, and pedal-aware shortening.
+
 Use a local checkpoint and automatic CUDA selection when available:
 
 ```bash
@@ -116,8 +159,8 @@ piano-scribe --verbose transcribe piano.wav \
 ```
 
 The model expects 16 kHz mono audio; the default pipeline preprocessing performs that conversion.
-Model loading and inference durations are logged. Real transcription quality has not yet been
-validated by this project on a representative audio corpus.
+Model loading and inference durations are logged. A manual real-piano smoke recording has exercised
+the complete backend, but that is not a representative quality evaluation corpus.
 
 Inspect decoded audio:
 
@@ -166,6 +209,7 @@ python/piano_transcriber/    Installable Python package
   audio/                     Loading and preprocessing
   models/                    Backend interface and adapters
   transcription/             Domain types, postprocessing, pipeline
+  score/                     Exact beat timing, quantization, chords, and diagnostics
   midi/                      MIDI serialization
   notation/                  MusicXML serialization
 tests/unit/                  Focused Python tests

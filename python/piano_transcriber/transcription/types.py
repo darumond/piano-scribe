@@ -36,11 +36,24 @@ class NoteEvent:
             raise ValueError("confidence must be finite and between 0 and 1")
 
 
+@dataclass(frozen=True, order=True, slots=True)
+class PedalEvent:
+    onset_seconds: float
+    offset_seconds: float
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.onset_seconds) or self.onset_seconds < 0.0:
+            raise ValueError("pedal onset must be finite and non-negative")
+        if not math.isfinite(self.offset_seconds) or self.offset_seconds <= self.onset_seconds:
+            raise ValueError("pedal offset must be finite and greater than onset")
+
+
 @dataclass(frozen=True, slots=True)
 class TranscriptionResult:
     notes: tuple[NoteEvent, ...]
     model_name: str
     audio_duration_seconds: float
+    pedal_events: tuple[PedalEvent, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.model_name:
@@ -49,3 +62,7 @@ class TranscriptionResult:
             raise ValueError("audio_duration_seconds must be finite and non-negative")
         if any(note.offset_seconds > self.audio_duration_seconds + 1e-6 for note in self.notes):
             raise ValueError("note events cannot extend beyond the audio duration")
+        if any(
+            pedal.offset_seconds > self.audio_duration_seconds + 1e-6 for pedal in self.pedal_events
+        ):
+            raise ValueError("pedal events cannot extend beyond the audio duration")

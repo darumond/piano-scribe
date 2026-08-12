@@ -37,3 +37,26 @@ def test_transcribe_parser_accepts_piano_runtime_options() -> None:
     assert args.model == "piano-transcription"
     assert args.device == "cpu"
     assert args.checkpoint == Path("weights/model.pth")
+
+
+def test_transcribe_parser_accepts_score_reconstruction_options() -> None:
+    args = _parser().parse_args(
+        [
+            "transcribe",
+            "piano.wav",
+            "--midi",
+            "piano.mid",
+            "--bpm",
+            "60",
+            "--time-signature",
+            "4/4",
+            "--quantization",
+            "eighth-triplet",
+            "--min-note-duration-ms",
+            "30",
+        ]
+    )
+    assert args.bpm == 60.0
+    assert args.time_signature == "4/4"
+    assert args.quantization == "eighth-triplet"
+    assert args.min_note_duration_ms == 30.0

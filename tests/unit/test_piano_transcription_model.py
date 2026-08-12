@@ -84,6 +84,9 @@ def test_adapter_converts_notes_pedals_and_logs_timings(
     ]
     assert result.notes[1].offset_seconds == 1.0
     assert result.notes[1].confidence == 0.8
+    assert [(event.onset_seconds, event.offset_seconds) for event in result.pedal_events] == [
+        (0.5, 0.9)
+    ]
     assert "Loaded piano transcription model on cpu" in caplog.text
     assert "inference completed on cpu in 2.00 s" in caplog.text
 
