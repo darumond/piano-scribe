@@ -125,6 +125,35 @@ piano-scribe transcribe piano.wav \
 dense polyphonic passages can make that estimate ambiguous. Supported grids are `quarter`,
 `eighth`, `eighth-triplet`, `sixteenth`, `sixteenth-triplet`, and `thirty-second`.
 
+For local beat, downbeat, and tempo tracking from symbolic note attacks, use `--track-beats`:
+
+```bash
+piano-scribe analyze-score transcription.json \
+  --track-beats \
+  --minimum-bpm 30 \
+  --maximum-bpm 220 \
+  --time-signature 4/4 \
+  --rhythmic-complexity-cost 0.35 \
+  --midi score.mid \
+  --musicxml score.musicxml \
+  --beats-tsv beats.tsv \
+  --tempo-tsv tempo.tsv \
+  --quantization-tsv quantization.tsv \
+  --diagnostics-json diagnostics.json
+```
+
+The local tracker clusters near-simultaneous chord attacks, weights velocity, bass motion, chord
+changes, and onset density, then follows a bounded pulse with robust local-period smoothing. It
+reports confidence for every beat and for the inferred 4/4 downbeat phase. Use `--first-beat` and
+`--first-downbeat` (timestamps in seconds) for manual alignment. The same overrides work with
+explicit `--bpm`, preserving a deterministic constant-tempo mode.
+
+Beat-aware quantization scores all supported subdivisions using timing error plus a configurable
+notation-complexity penalty. This makes straight eighths preferable to triplet or finer grids when
+their timing fits are close. Candidate timing errors, penalties, and the selected subdivision are
+included per note in JSON and TSV diagnostics. Local tempo changes are emitted as MIDI tempo events
+and MusicXML measure-level tempo directions.
+
 Very short acoustic events are retained by default and receive a suspicious-event diagnostic.
 Use `--min-note-duration-ms 30` to opt into filtering; every filtered or merged event remains in the
 JSON/TSV diagnostics. The current pedal heuristic prevents a pedal-overlapped acoustic offset from
@@ -146,6 +175,10 @@ piano-scribe analyze-score transcription.json \
 
 The diagnostics report raw and quantized onsets, timing error, raw and written durations, measure
 position, chord size, suspicious classifications, filtering, merging, and pedal-aware shortening.
+Beat-aware reports additionally include continuous beat position, subdivision candidates, beat
+confidence, downbeats, and piecewise tempo segments. The onset-based tracker is intentionally a
+replaceable baseline; complex rubato and metrically ambiguous music can still require manual
+alignment.
 
 Use a local checkpoint and automatic CUDA selection when available:
 

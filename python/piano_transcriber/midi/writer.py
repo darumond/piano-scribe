@@ -67,7 +67,7 @@ def write_score_midi(
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tempo = mido.bpm2tempo(score.bpm)
-    events: list[tuple[int, int, mido.Message]] = []
+    events: list[tuple[int, int, mido.Message | mido.MetaMessage]] = []
     for note in score.notes:
         onset_ticks = round(float(note.onset_beats) * ticks_per_beat)
         offset_ticks = round(float(note.offset_beats) * ticks_per_beat)
@@ -90,13 +90,26 @@ def write_score_midi(
                 mido.Message("control_change", control=64, value=0),
             )
         )
+    if score.beat_track is not None:
+        padding = score.beat_track.measure_padding_beats
+        for beat in score.beat_track.beats:
+            beat_ticks = round((beat.number + padding) * ticks_per_beat)
+            if beat_ticks >= 0:
+                events.append(
+                    (
+                        beat_ticks,
+                        -1,
+                        mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(beat.bpm)),
+                    )
+                )
     events.sort(key=lambda item: (item[0], item[1]))
 
     midi = mido.MidiFile(ticks_per_beat=ticks_per_beat)
     track = mido.MidiTrack()
     midi.tracks.append(track)
     track.append(mido.MetaMessage("track_name", name="PianoScribe reconstructed score", time=0))
-    track.append(mido.MetaMessage("set_tempo", tempo=tempo, time=0))
+    if score.beat_track is None:
+        track.append(mido.MetaMessage("set_tempo", tempo=tempo, time=0))
     previous_ticks = 0
     for absolute_ticks, _priority, message in events:
         message.time = max(0, absolute_ticks - previous_ticks)

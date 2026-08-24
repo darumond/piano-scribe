@@ -31,6 +31,7 @@ def fraction_text(value: Fraction | None) -> str | None:
 
 def duration_name(value: Fraction) -> str:
     return {
+        Fraction(1, 24): "sixty-fourth-triplet",
         Fraction(4): "whole",
         Fraction(3): "dotted-half",
         Fraction(2): "half",
@@ -102,7 +103,19 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
                 "raw_duration_seconds": diagnostic.raw_offset_seconds
                 - diagnostic.raw_onset_seconds,
                 "quantized_onset_beats": fraction_text(diagnostic.quantized_onset_beats),
+                "continuous_onset_beats": diagnostic.continuous_onset_beats,
                 "quantization_error_ms": diagnostic.quantization_error_seconds * 1000.0,
+                "selected_subdivision": diagnostic.selected_subdivision,
+                "quantization_candidates": [
+                    {
+                        "subdivision": candidate.subdivision,
+                        "position_beats": fraction_text(candidate.position_beats),
+                        "timing_error_ms": candidate.timing_error_seconds * 1000.0,
+                        "complexity_penalty": candidate.complexity_penalty,
+                        "total_score": candidate.total_score,
+                    }
+                    for candidate in diagnostic.quantization_candidates
+                ],
                 "written_duration_beats": fraction_text(diagnostic.written_duration_beats),
                 "written_duration_name": (
                     duration_name(diagnostic.written_duration_beats)
@@ -123,6 +136,17 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
     action_counts = Counter(item.action for item in score.diagnostics)
     rhythms = Counter(duration_name(note.duration_beats) for note in score.notes)
     errors = sorted(abs(item.quantization_error_seconds) * 1000.0 for item in score.diagnostics)
+    beat_summary: dict[str, object] | None = None
+    if score.beat_track is not None:
+        minimum_bpm, maximum_bpm = score.beat_track.bpm_range
+        beat_summary = {
+            "beat_count": len(score.beat_track.beats),
+            "median_bpm": score.beat_track.median_bpm,
+            "minimum_bpm": minimum_bpm,
+            "maximum_bpm": maximum_bpm,
+            "downbeat_phase": score.beat_track.downbeat_phase,
+            "downbeat_confidence": score.beat_track.downbeat_confidence,
+        }
     return {
         "bpm": score.bpm,
         "time_signature": str(score.time_signature),
@@ -144,6 +168,7 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
             "p95": errors[min(len(errors) - 1, int(len(errors) * 0.95))] if errors else 0.0,
             "maximum": errors[-1] if errors else 0.0,
         },
+        "beat_tracking": beat_summary,
         "events": events,
     }
 
@@ -166,5 +191,42 @@ def write_diagnostics_tsv(score: ReconstructedScore, path: str | Path) -> Path:
         for event in events:
             row = dict(event)
             row["suspicious_reasons"] = ",".join(cast(list[str], row["suspicious_reasons"]))
+            row["quantization_candidates"] = json.dumps(row["quantization_candidates"])
             writer.writerow(row)
+    return output
+
+
+def write_beats_tsv(score: ReconstructedScore, path: str | Path) -> Path:
+    if score.beat_track is None:
+        raise ValueError("beat diagnostics require a beat-aware score")
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream, delimiter="\t")
+        writer.writerow(("beat_number", "timestamp_seconds", "bpm", "downbeat", "confidence"))
+        for beat in score.beat_track.beats:
+            writer.writerow(
+                (beat.number, beat.timestamp_seconds, beat.bpm, beat.downbeat, beat.confidence)
+            )
+    return output
+
+
+def write_tempo_tsv(score: ReconstructedScore, path: str | Path) -> Path:
+    if score.beat_track is None:
+        raise ValueError("tempo diagnostics require a beat-aware score")
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream, delimiter="\t")
+        writer.writerow(("start_beat", "end_beat", "start_seconds", "end_seconds", "bpm"))
+        for segment in score.beat_track.tempo_segments:
+            writer.writerow(
+                (
+                    segment.start_beat,
+                    segment.end_beat,
+                    segment.start_seconds,
+                    segment.end_seconds,
+                    segment.bpm,
+                )
+            )
     return output

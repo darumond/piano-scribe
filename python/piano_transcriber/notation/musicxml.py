@@ -8,8 +8,11 @@ from fractions import Fraction
 from math import lcm
 from pathlib import Path
 
+from piano_transcriber.score.quantize import WRITTEN_DURATIONS
 from piano_transcriber.score.types import ReconstructedScore, ScoreNote
 from piano_transcriber.transcription.types import NoteEvent, TranscriptionResult
+
+_SPLIT_DURATIONS = tuple(sorted((*WRITTEN_DURATIONS, Fraction(1, 24), Fraction(1, 48))))
 
 _PITCHES: tuple[tuple[str, int], ...] = (
     ("C", 0),
@@ -116,25 +119,33 @@ def _segments(score: ReconstructedScore) -> tuple[_NoteSegment, ...]:
         while remaining > 0:
             measure_index = int(position // measure_length)
             onset = position - measure_index * measure_length
-            duration = min(remaining, measure_length - onset)
-            remaining -= duration
-            segments.append(
-                _NoteSegment(
-                    note,
-                    measure_index,
-                    onset,
-                    duration,
-                    tie_stop=not first,
-                    tie_start=remaining > 0,
+            measure_remaining = min(remaining, measure_length - onset)
+            while measure_remaining > 0:
+                conventional = max(
+                    duration for duration in _SPLIT_DURATIONS if duration <= measure_remaining
                 )
-            )
-            position += duration
-            first = False
+                remaining -= conventional
+                measure_remaining -= conventional
+                segments.append(
+                    _NoteSegment(
+                        note,
+                        measure_index,
+                        onset,
+                        conventional,
+                        tie_stop=not first,
+                        tie_start=remaining > 0,
+                    )
+                )
+                position += conventional
+                onset += conventional
+                first = False
     return tuple(segments)
 
 
 def _duration_notation(duration: Fraction) -> tuple[str, int, tuple[int, int] | None]:
     notation = {
+        Fraction(1, 48): ("128th", 0, (3, 2)),
+        Fraction(1, 24): ("64th", 0, (3, 2)),
         Fraction(4): ("whole", 0, None),
         Fraction(3): ("half", 1, None),
         Fraction(2): ("half", 0, None),
@@ -234,6 +245,19 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
             ET.SubElement(metronome, "beat-unit").text = "quarter"
             ET.SubElement(metronome, "per-minute").text = f"{score.bpm:g}"
             ET.SubElement(direction, "sound", tempo=f"{score.bpm:g}")
+        elif score.beat_track is not None:
+            score_beat = measure_index * float(score.time_signature.measure_beats)
+            track_beat = score_beat - score.beat_track.measure_padding_beats
+            nearest = min(
+                score.beat_track.beats,
+                key=lambda beat: abs(beat.number - track_beat),
+            )
+            direction = ET.SubElement(measure, "direction", placement="above")
+            direction_type = ET.SubElement(direction, "direction-type")
+            metronome = ET.SubElement(direction_type, "metronome")
+            ET.SubElement(metronome, "beat-unit").text = "quarter"
+            ET.SubElement(metronome, "per-minute").text = f"{nearest.bpm:g}"
+            ET.SubElement(direction, "sound", tempo=f"{nearest.bpm:g}")
 
         measure_segments = by_measure.get(measure_index, [])
         grouped: dict[Fraction, list[_NoteSegment]] = {}

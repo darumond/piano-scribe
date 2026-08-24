@@ -8,11 +8,18 @@ from fractions import Fraction
 
 from piano_transcriber.score.beats import required_measures
 from piano_transcriber.score.chords import group_chords
-from piano_transcriber.score.quantize import QuantizationGrid, snap_to_grid, snap_written_duration
+from piano_transcriber.score.quantize import (
+    QuantizationGrid,
+    choose_quantization,
+    snap_to_grid,
+    snap_written_duration,
+)
 from piano_transcriber.score.tempo import beats_to_seconds, seconds_to_beats
+from piano_transcriber.score.tracking import BeatTrack
 from piano_transcriber.score.types import (
     EventDiagnostic,
     PedalInterval,
+    QuantizationCandidate,
     ReconstructedScore,
     ScoreNote,
     TimeSignature,
@@ -25,6 +32,8 @@ class ReconstructionConfig:
     bpm: float
     grid: QuantizationGrid = QuantizationGrid.SIXTEENTH
     maximum_quantization_error_ms: float = 125.0
+    adaptive_quantization: bool = False
+    rhythmic_complexity_cost: float = 0.35
     minimum_note_duration_ms: float | None = None
     suspicious_note_duration_ms: float = 30.0
     merge_same_pitch_at_quantized_onset: bool = True
@@ -35,6 +44,8 @@ class ReconstructionConfig:
             raise ValueError("BPM must be finite and positive")
         if self.maximum_quantization_error_ms < 0.0:
             raise ValueError("maximum quantization error must be non-negative")
+        if self.rhythmic_complexity_cost < 0.0:
+            raise ValueError("rhythmic complexity cost must be non-negative")
         if self.minimum_note_duration_ms is not None and self.minimum_note_duration_ms < 0.0:
             raise ValueError("minimum note duration must be non-negative")
         if self.suspicious_note_duration_ms < 0.0:
@@ -48,6 +59,9 @@ class _Candidate:
     onset_beats: Fraction
     quantization_error_seconds: float
     suspicious_reasons: tuple[str, ...]
+    continuous_onset_beats: float
+    selected_subdivision: str
+    quantization_candidates: tuple[QuantizationCandidate, ...]
 
 
 def reconstruct_score(
@@ -55,15 +69,47 @@ def reconstruct_score(
     config: ReconstructionConfig,
     *,
     pedal_intervals: tuple[PedalEvent, ...] | None = None,
+    beat_track: BeatTrack | None = None,
 ) -> ReconstructedScore:
     """Create a new symbolic score without mutating the transcription result."""
     candidates: list[_Candidate] = []
     diagnostics: dict[int, EventDiagnostic] = {}
-    step = config.grid.step_beats
+    step = (
+        min(grid.step_beats for grid in QuantizationGrid)
+        if config.adaptive_quantization
+        else config.grid.step_beats
+    )
+    beat_offset = beat_track.measure_padding_beats if beat_track is not None else 0.0
     for source_index, note in enumerate(result.notes):
-        continuous_onset = seconds_to_beats(note.onset_seconds, config.bpm)
-        quantized_onset = snap_to_grid(continuous_onset, step)
-        error_seconds = beats_to_seconds(quantized_onset - continuous_onset, config.bpm)
+        if beat_track is None:
+            continuous_fraction = seconds_to_beats(note.onset_seconds, config.bpm)
+            continuous_onset = float(continuous_fraction)
+            quantized_onset = snap_to_grid(continuous_fraction, step)
+            error_seconds = beats_to_seconds(quantized_onset - continuous_fraction, config.bpm)
+            selected_subdivision = config.grid.value
+            quantization_candidates: tuple[QuantizationCandidate, ...] = ()
+        else:
+            continuous_onset = beat_track.seconds_to_beats(note.onset_seconds) + beat_offset
+            if config.adaptive_quantization:
+                selected, quantization_candidates = choose_quantization(
+                    continuous_onset,
+                    note.onset_seconds,
+                    beat_track,
+                    complexity_cost=config.rhythmic_complexity_cost,
+                    tolerance_ms=config.maximum_quantization_error_ms,
+                    beat_offset=beat_offset,
+                )
+                quantized_onset = selected.position_beats
+                error_seconds = selected.timing_error_seconds
+                selected_subdivision = selected.subdivision
+            else:
+                quantized_onset = snap_to_grid(Fraction(str(continuous_onset)), step)
+                error_seconds = (
+                    beat_track.beats_to_seconds(float(quantized_onset) - beat_offset)
+                    - note.onset_seconds
+                )
+                selected_subdivision = config.grid.value
+                quantization_candidates = ()
         raw_duration_ms = (note.offset_seconds - note.onset_seconds) * 1000.0
         reasons: list[str] = []
         if raw_duration_ms < config.suspicious_note_duration_ms:
@@ -84,6 +130,9 @@ def reconstruct_score(
                 None,
                 "filtered",
                 tuple(reasons),
+                continuous_onset_beats=continuous_onset,
+                selected_subdivision=selected_subdivision,
+                quantization_candidates=quantization_candidates,
             )
             continue
         candidates.append(
@@ -93,6 +142,9 @@ def reconstruct_score(
                 quantized_onset,
                 error_seconds,
                 tuple(reasons),
+                continuous_onset,
+                selected_subdivision,
+                quantization_candidates,
             )
         )
 
@@ -126,6 +178,9 @@ def reconstruct_score(
                     "merged",
                     duplicate.suspicious_reasons,
                     primary.source_index,
+                    continuous_onset_beats=duplicate.continuous_onset_beats,
+                    selected_subdivision=duplicate.selected_subdivision,
+                    quantization_candidates=duplicate.quantization_candidates,
                 )
     else:
         retained = candidates
@@ -151,7 +206,11 @@ def reconstruct_score(
     score_notes: list[ScoreNote] = []
     for candidate in retained:
         note = candidate.note
-        raw_offset_beats = seconds_to_beats(note.offset_seconds, config.bpm)
+        raw_offset_beats = (
+            seconds_to_beats(note.offset_seconds, config.bpm)
+            if beat_track is None
+            else Fraction(str(beat_track.seconds_to_beats(note.offset_seconds) + beat_offset))
+        )
         target_offset = raw_offset_beats
         pedal_shortened = False
         next_group = next_onset_by_onset[candidate.onset_beats]
@@ -192,6 +251,9 @@ def reconstruct_score(
             "quantized",
             candidate.suspicious_reasons,
             pedal_duration_shortened=pedal_shortened,
+            continuous_onset_beats=candidate.continuous_onset_beats,
+            selected_subdivision=candidate.selected_subdivision,
+            quantization_candidates=candidate.quantization_candidates,
         )
 
     score_notes_tuple = tuple(sorted(score_notes, key=lambda note: (note.onset_beats, note.pitch)))
@@ -202,8 +264,20 @@ def reconstruct_score(
         PedalInterval(
             interval.onset_seconds,
             interval.offset_seconds,
-            seconds_to_beats(interval.onset_seconds, config.bpm),
-            seconds_to_beats(interval.offset_seconds, config.bpm),
+            (
+                seconds_to_beats(interval.onset_seconds, config.bpm)
+                if beat_track is None
+                else Fraction(
+                    str(beat_track.seconds_to_beats(interval.onset_seconds) + beat_offset)
+                )
+            ),
+            (
+                seconds_to_beats(interval.offset_seconds, config.bpm)
+                if beat_track is None
+                else Fraction(
+                    str(beat_track.seconds_to_beats(interval.offset_seconds) + beat_offset)
+                )
+            ),
         )
         for interval in raw_pedals
     )
@@ -211,13 +285,14 @@ def reconstruct_score(
     return ReconstructedScore(
         bpm=config.bpm,
         time_signature=config.time_signature,
-        grid_name=config.grid.value,
+        grid_name="adaptive" if config.adaptive_quantization else config.grid.value,
         grid_step_beats=step,
         notes=score_notes_tuple,
         chords=chords,
         diagnostics=ordered_diagnostics,
         pedal_intervals=score_pedals,
         measure_count=required_measures(end_position, config.time_signature),
+        beat_track=beat_track,
     )
 
 

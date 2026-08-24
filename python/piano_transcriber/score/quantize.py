@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from enum import StrEnum
 from fractions import Fraction
+from typing import TYPE_CHECKING
+
+from piano_transcriber.score.types import QuantizationCandidate
+
+if TYPE_CHECKING:
+    from piano_transcriber.score.tracking import BeatTrack
 
 
 class QuantizationGrid(StrEnum):
@@ -23,6 +29,17 @@ class QuantizationGrid(StrEnum):
             self.SIXTEENTH: Fraction(1, 4),
             self.SIXTEENTH_TRIPLET: Fraction(1, 6),
             self.THIRTY_SECOND: Fraction(1, 8),
+        }[self]
+
+    @property
+    def complexity(self) -> float:
+        return {
+            self.QUARTER: 0.0,
+            self.EIGHTH: 0.12,
+            self.EIGHTH_TRIPLET: 0.7,
+            self.SIXTEENTH: 0.32,
+            self.SIXTEENTH_TRIPLET: 0.95,
+            self.THIRTY_SECOND: 0.62,
         }[self]
 
 
@@ -73,3 +90,31 @@ def snap_written_duration(
         if bounded:
             candidates = bounded
     return min(candidates, key=lambda candidate: (abs(candidate - duration), candidate))
+
+
+def choose_quantization(
+    continuous_position: float,
+    raw_seconds: float,
+    beat_track: BeatTrack,
+    *,
+    complexity_cost: float = 0.35,
+    tolerance_ms: float = 125.0,
+    beat_offset: float = 0.0,
+    grids: tuple[QuantizationGrid, ...] = tuple(QuantizationGrid),
+) -> tuple[QuantizationCandidate, tuple[QuantizationCandidate, ...]]:
+    """Score timing fit and notation complexity, preferring simpler near-equivalent grids."""
+    if complexity_cost < 0 or tolerance_ms <= 0:
+        raise ValueError("complexity cost must be non-negative and tolerance positive")
+    position = Fraction(str(continuous_position))
+    candidates: list[QuantizationCandidate] = []
+    for grid in grids:
+        snapped = snap_to_grid(position, grid.step_beats)
+        snapped_seconds = beat_track.beats_to_seconds(float(snapped) - beat_offset)
+        timing_error = snapped_seconds - raw_seconds
+        penalty = complexity_cost * grid.complexity
+        total = abs(timing_error) * 1000 / tolerance_ms + penalty
+        candidates.append(QuantizationCandidate(grid.value, snapped, timing_error, penalty, total))
+    ordered = tuple(
+        sorted(candidates, key=lambda item: (item.total_score, item.complexity_penalty))
+    )
+    return ordered[0], ordered

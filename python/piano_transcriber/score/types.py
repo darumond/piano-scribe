@@ -5,6 +5,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from fractions import Fraction
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from piano_transcriber.score.tracking import BeatTrack
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +37,16 @@ class TimeSignature:
 
     def __str__(self) -> str:
         return f"{self.numerator}/{self.denominator}"
+
+
+@dataclass(frozen=True, slots=True)
+class MeasurePosition:
+    measure_number: int
+    beat_in_measure: Fraction
+
+    def __post_init__(self) -> None:
+        if self.measure_number <= 0 or self.beat_in_measure < 0:
+            raise ValueError("measure position must be non-negative and one-indexed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +110,15 @@ class ScoreChord:
 
 
 @dataclass(frozen=True, slots=True)
+class QuantizationCandidate:
+    subdivision: str
+    position_beats: Fraction
+    timing_error_seconds: float
+    complexity_penalty: float
+    total_score: float
+
+
+@dataclass(frozen=True, slots=True)
 class EventDiagnostic:
     source_index: int
     pitch: int
@@ -108,6 +131,9 @@ class EventDiagnostic:
     suspicious_reasons: tuple[str, ...] = ()
     merged_into_source_index: int | None = None
     pedal_duration_shortened: bool = False
+    continuous_onset_beats: float | None = None
+    selected_subdivision: str | None = None
+    quantization_candidates: tuple[QuantizationCandidate, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +147,7 @@ class ReconstructedScore:
     diagnostics: tuple[EventDiagnostic, ...]
     pedal_intervals: tuple[PedalInterval, ...]
     measure_count: int
+    beat_track: BeatTrack | None = None
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.bpm) or self.bpm <= 0.0:

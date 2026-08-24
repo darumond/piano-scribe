@@ -18,8 +18,10 @@ from piano_transcriber.notation.musicxml import write_score_musicxml
 from piano_transcriber.score.diagnostics import (
     load_transcription_json,
     score_diagnostics,
+    write_beats_tsv,
     write_diagnostics_json,
     write_diagnostics_tsv,
+    write_tempo_tsv,
 )
 from piano_transcriber.score.quantize import QuantizationGrid
 from piano_transcriber.score.reconstruct import ReconstructionConfig, reconstruct_score
@@ -27,6 +29,12 @@ from piano_transcriber.score.tempo import (
     ExplicitTempo,
     MedianInterOnsetTempoEstimator,
     TempoEstimator,
+)
+from piano_transcriber.score.tracking import (
+    BeatTrack,
+    SymbolicBeatTrackerConfig,
+    SymbolicOnsetBeatTracker,
+    fixed_beat_track,
 )
 from piano_transcriber.score.types import ReconstructedScore, TimeSignature
 from piano_transcriber.transcription.pipeline import TranscriptionPipeline
@@ -43,10 +51,29 @@ def _add_score_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="use the simple onset-based tempo baseline",
     )
+    tempo.add_argument(
+        "--track-beats",
+        action="store_true",
+        help="infer beats, downbeats, and a local tempo curve from note onsets",
+    )
     parser.add_argument(
         "--time-signature",
         default="4/4",
         help="score time signature (default: 4/4)",
+    )
+    parser.add_argument("--first-beat", type=float, help="manual first beat timestamp in seconds")
+    parser.add_argument(
+        "--first-downbeat",
+        type=float,
+        help="manual downbeat timestamp in seconds",
+    )
+    parser.add_argument("--minimum-bpm", type=float, default=30.0)
+    parser.add_argument("--maximum-bpm", type=float, default=220.0)
+    parser.add_argument(
+        "--rhythmic-complexity-cost",
+        type=float,
+        default=0.35,
+        help="penalty favoring simpler rhythmic subdivisions (default: 0.35)",
     )
     parser.add_argument(
         "--quantization",
@@ -67,6 +94,13 @@ def _add_score_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--diagnostics-json", type=Path, help="score diagnostics JSON path")
     parser.add_argument("--diagnostics-tsv", type=Path, help="score diagnostics TSV path")
+    parser.add_argument("--beats-tsv", type=Path, help="inferred beat diagnostics TSV path")
+    parser.add_argument("--tempo-tsv", type=Path, help="local tempo segments TSV path")
+    parser.add_argument(
+        "--quantization-tsv",
+        type=Path,
+        help="note quantization decisions TSV path",
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -123,8 +157,17 @@ def _run_transcribe(args: argparse.Namespace) -> int:
         checkpoint_path=args.checkpoint,
         device=args.device,
     )
-    if args.bpm is None and not args.estimate_bpm:
-        if args.diagnostics_json is not None or args.diagnostics_tsv is not None:
+    if args.bpm is None and not args.estimate_bpm and not args.track_beats:
+        if any(
+            path is not None
+            for path in (
+                args.diagnostics_json,
+                args.diagnostics_tsv,
+                args.beats_tsv,
+                args.tempo_tsv,
+                args.quantization_tsv,
+            )
+        ):
             raise ValueError("score diagnostics require --bpm")
         output = TranscriptionPipeline(config).run(
             args.input, midi_path=args.midi, musicxml_path=args.musicxml
@@ -133,7 +176,7 @@ def _run_transcribe(args: argparse.Namespace) -> int:
         return 0
 
     output = TranscriptionPipeline(config).run(args.input)
-    score = reconstruct_score(output.result, _score_config(args, output.result))
+    score = _reconstruct(args, output.result)
     _write_score_outputs(score, args)
     print(f"Transcribed {len(output.result.notes)} notes with {output.result.model_name}")
     print(
@@ -143,21 +186,68 @@ def _run_transcribe(args: argparse.Namespace) -> int:
     return 0
 
 
-def _score_config(args: argparse.Namespace, result: TranscriptionResult) -> ReconstructionConfig:
+def _score_config(
+    args: argparse.Namespace,
+    result: TranscriptionResult,
+    *,
+    bpm: float | None = None,
+    adaptive: bool = False,
+) -> ReconstructionConfig:
     tempo: TempoEstimator
-    if args.bpm is not None:
+    if bpm is not None:
+        resolved_bpm = bpm
+    elif args.bpm is not None:
         tempo = ExplicitTempo(args.bpm)
+        resolved_bpm = tempo.estimate_bpm(result)
     elif args.estimate_bpm:
         tempo = MedianInterOnsetTempoEstimator()
+        resolved_bpm = tempo.estimate_bpm(result)
     else:
-        raise ValueError("score reconstruction requires --bpm or --estimate-bpm")
+        raise ValueError("score reconstruction requires --bpm, --estimate-bpm, or --track-beats")
     return ReconstructionConfig(
-        bpm=tempo.estimate_bpm(result),
+        bpm=resolved_bpm,
         grid=QuantizationGrid(args.quantization),
         maximum_quantization_error_ms=args.max_quantization_error_ms,
+        adaptive_quantization=adaptive,
+        rhythmic_complexity_cost=args.rhythmic_complexity_cost,
         minimum_note_duration_ms=args.min_note_duration_ms,
         time_signature=TimeSignature.parse(args.time_signature),
     )
+
+
+def _reconstruct(args: argparse.Namespace, result: TranscriptionResult) -> ReconstructedScore:
+    signature = TimeSignature.parse(args.time_signature)
+    beat_track: BeatTrack | None = None
+    if args.track_beats:
+        tracker = SymbolicOnsetBeatTracker(
+            SymbolicBeatTrackerConfig(
+                minimum_bpm=args.minimum_bpm,
+                maximum_bpm=args.maximum_bpm,
+                time_signature=signature,
+                first_beat_seconds=args.first_beat,
+                first_downbeat_seconds=args.first_downbeat,
+            )
+        )
+        beat_track = tracker.track(result)
+        config = _score_config(
+            args,
+            result,
+            bpm=beat_track.median_bpm,
+            adaptive=True,
+        )
+    else:
+        config = _score_config(args, result)
+        if args.bpm is not None and (
+            args.first_beat is not None or args.first_downbeat is not None
+        ):
+            beat_track = fixed_beat_track(
+                result.audio_duration_seconds,
+                args.bpm,
+                time_signature=signature,
+                first_beat_seconds=args.first_beat or 0.0,
+                first_downbeat_seconds=args.first_downbeat,
+            )
+    return reconstruct_score(result, config, beat_track=beat_track)
 
 
 def _write_score_outputs(score: ReconstructedScore, args: argparse.Namespace) -> None:
@@ -173,14 +263,20 @@ def _write_score_outputs(score: ReconstructedScore, args: argparse.Namespace) ->
     if args.diagnostics_tsv is not None:
         write_diagnostics_tsv(score, args.diagnostics_tsv)
         logger.info("Wrote score diagnostics TSV to %s", args.diagnostics_tsv)
+    if args.quantization_tsv is not None:
+        write_diagnostics_tsv(score, args.quantization_tsv)
+        logger.info("Wrote quantization TSV to %s", args.quantization_tsv)
+    if args.beats_tsv is not None:
+        write_beats_tsv(score, args.beats_tsv)
+        logger.info("Wrote beat TSV to %s", args.beats_tsv)
+    if args.tempo_tsv is not None:
+        write_tempo_tsv(score, args.tempo_tsv)
+        logger.info("Wrote tempo TSV to %s", args.tempo_tsv)
 
 
 def _run_analyze_score(args: argparse.Namespace) -> int:
     result = load_transcription_json(args.input)
-    score = reconstruct_score(
-        result,
-        _score_config(args, result),
-    )
+    score = _reconstruct(args, result)
     _write_score_outputs(score, args)
     summary = score_diagnostics(score)
     print(f"BPM: {score.bpm:g}")
@@ -190,6 +286,15 @@ def _run_analyze_score(args: argparse.Namespace) -> int:
     print(f"Measures: {score.measure_count}")
     print(f"Actions: {summary['actions']}")
     print(f"Rhythms: {summary['rhythmic_values']}")
+    if score.beat_track is not None:
+        minimum_bpm, maximum_bpm = score.beat_track.bpm_range
+        beat_count = len(score.beat_track.beats)
+        median_bpm = score.beat_track.median_bpm
+        print(
+            f"Tracked {beat_count} beats; median {median_bpm:.2f} "
+            f"BPM, range {minimum_bpm:.2f}-{maximum_bpm:.2f}"
+        )
+        print(f"Downbeat confidence: {score.beat_track.downbeat_confidence:.3f}")
     return 0
 
 

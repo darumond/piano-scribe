@@ -60,3 +60,33 @@ def test_transcribe_parser_accepts_score_reconstruction_options() -> None:
     assert args.time_signature == "4/4"
     assert args.quantization == "eighth-triplet"
     assert args.min_note_duration_ms == 30.0
+
+
+def test_analyze_parser_accepts_local_tracking_and_diagnostics() -> None:
+    args = _parser().parse_args(
+        [
+            "analyze-score",
+            "transcription.json",
+            "--track-beats",
+            "--first-downbeat",
+            "1.23",
+            "--minimum-bpm",
+            "40",
+            "--maximum-bpm",
+            "180",
+            "--rhythmic-complexity-cost",
+            "0.5",
+            "--beats-tsv",
+            "beats.tsv",
+            "--tempo-tsv",
+            "tempo.tsv",
+            "--quantization-tsv",
+            "quantization.tsv",
+        ]
+    )
+    assert args.track_beats
+    assert args.first_downbeat == 1.23
+    assert args.minimum_bpm == 40.0
+    assert args.maximum_bpm == 180.0
+    assert args.rhythmic_complexity_cost == 0.5
+    assert args.beats_tsv == Path("beats.tsv")
