@@ -132,3 +132,29 @@ def test_analyze_parser_accepts_sequence_rhythm_options() -> None:
     assert args.rhythm_path_tsv == Path("rhythm-path.tsv")
     assert args.rhythm_beam_size == 32
     assert args.rhythm_triplet_switch_weight == 1.2
+
+
+def test_analyze_parser_accepts_piano_layout_options() -> None:
+    args = _parser().parse_args(
+        [
+            "analyze-score",
+            "transcription.json",
+            "--bpm",
+            "60",
+            "--piano-layout",
+            "sequence",
+            "--staff-assignment-tsv",
+            "staff.tsv",
+            "--voice-assignment-tsv",
+            "voice.tsv",
+            "--hand-split-pitch",
+            "61",
+            "--voice-beam-size",
+            "24",
+        ]
+    )
+    assert args.piano_layout == "sequence"
+    assert args.staff_assignment_tsv == Path("staff.tsv")
+    assert args.voice_assignment_tsv == Path("voice.tsv")
+    assert args.hand_split_pitch == 61
+    assert args.voice_beam_size == 24

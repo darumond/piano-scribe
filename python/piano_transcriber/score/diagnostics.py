@@ -9,7 +9,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict
 from fractions import Fraction
-from itertools import pairwise
+from itertools import groupby, pairwise
 from pathlib import Path
 from typing import Any, cast
 
@@ -171,6 +171,18 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
                 "local_best_position_beats": fraction_text(diagnostic.local_best_position_beats),
                 "optimizer_selection_reason": diagnostic.optimizer_selection_reason,
                 "optimizer_changed_local_choice": diagnostic.optimizer_changed_local_choice,
+                "assigned_hand": diagnostic.assigned_hand,
+                "assigned_staff": diagnostic.assigned_staff,
+                "assigned_voice": diagnostic.assigned_voice,
+                "chord_id": diagnostic.chord_id,
+                "hand_assignment_cost": diagnostic.hand_assignment_cost,
+                "hand_assignment_confidence": diagnostic.hand_assignment_confidence,
+                "voice_assignment_cost": diagnostic.voice_assignment_cost,
+                "previous_continuity_cost": diagnostic.previous_continuity_cost,
+                "next_continuity_cost": diagnostic.next_continuity_cost,
+                "voice_duration_adjusted": diagnostic.voice_duration_adjusted,
+                "original_duration_beats": fraction_text(diagnostic.original_duration_beats),
+                "tie_across_measure": note.tie_across_measure if note is not None else False,
             }
         )
     action_counts = Counter(item.action for item in score.diagnostics)
@@ -212,7 +224,98 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
         },
         "beat_tracking": beat_summary,
         "rhythm_optimization": rhythm_optimization_data(score),
+        "piano_layout": piano_layout_data(score),
         "events": events,
+    }
+
+
+def piano_layout_data(score: ReconstructedScore) -> dict[str, object]:
+    """Summarize staff, hand, voice, chord, and continuity assignments."""
+    hand_counts = Counter(
+        note.hand.value if note.hand is not None else "unassigned" for note in score.notes
+    )
+    staff_counts = Counter(note.staff for note in score.notes)
+    voice_counts = {
+        str(staff): len({note.voice for note in score.notes if note.staff == staff})
+        for staff in (1, 2)
+    }
+    hand_crossings = 0
+    split_chords = 0
+    maximum_spans = {"left": 0, "right": 0}
+    for chord in score.chords:
+        hands = {note.hand for note in chord.notes if note.hand is not None}
+        if len(hands) > 1:
+            split_chords += 1
+        left = [
+            note.pitch
+            for note in chord.notes
+            if note.hand is not None and note.hand.value == "left"
+        ]
+        right = [
+            note.pitch
+            for note in chord.notes
+            if note.hand is not None and note.hand.value == "right"
+        ]
+        if left:
+            maximum_spans["left"] = max(maximum_spans["left"], max(left) - min(left))
+        if right:
+            maximum_spans["right"] = max(maximum_spans["right"], max(right) - min(right))
+        if left and right and max(left) > min(right):
+            hand_crossings += 1
+
+    melodic_intervals: dict[str, float] = {}
+    voice_switches = 0
+    for staff in (1, 2):
+        for voice in sorted({note.voice for note in score.notes if note.staff == staff}):
+            representatives = []
+            voice_notes = sorted(
+                (note for note in score.notes if note.staff == staff and note.voice == voice),
+                key=lambda note: (note.onset_beats, note.pitch),
+            )
+            for _onset, group in groupby(voice_notes, key=lambda note: note.onset_beats):
+                representatives.append(statistics.mean(note.pitch for note in group))
+            intervals = [abs(later - earlier) for earlier, later in pairwise(representatives)]
+            melodic_intervals[f"staff_{staff}_voice_{voice}"] = (
+                statistics.mean(intervals) if intervals else 0.0
+            )
+        by_pitch: dict[int, list[Any]] = {}
+        for note in score.notes:
+            if note.staff == staff:
+                by_pitch.setdefault(note.pitch, []).append(note)
+        voice_switches += sum(
+            earlier.voice != later.voice
+            for pitch_notes in by_pitch.values()
+            for earlier, later in pairwise(
+                sorted(pitch_notes, key=lambda note: (note.onset_beats, note.source_index))
+            )
+        )
+
+    staff_crossings = sum(
+        (note.hand is not None)
+        and (
+            (note.hand.value == "right" and note.staff != 1)
+            or (note.hand.value == "left" and note.staff != 2)
+        )
+        for note in score.notes
+    )
+    return {
+        "mode": score.piano_layout,
+        "notes_by_hand": dict(sorted(hand_counts.items())),
+        "notes_by_staff": {str(key): value for key, value in sorted(staff_counts.items())},
+        "voices_per_staff": voice_counts,
+        "voice_count": sum(voice_counts.values()),
+        "voice_switches": voice_switches,
+        "hand_crossings": hand_crossings,
+        "staff_crossings": staff_crossings,
+        "average_melodic_interval_semitones": melodic_intervals,
+        "maximum_simultaneous_span_semitones": maximum_spans,
+        "chord_groups_split_between_hands": split_chords,
+        "voice_duration_changes": score.voice_duration_changes,
+        "explicit_rest_count": len(score.rests),
+        "hand_optimizer_seconds": score.hand_optimizer_seconds,
+        "hand_evaluated_transitions": score.hand_evaluated_transitions,
+        "voice_optimizer_seconds": score.voice_optimizer_seconds,
+        "voice_evaluated_transitions": score.voice_evaluated_transitions,
     }
 
 
@@ -390,6 +493,63 @@ def write_rhythm_path_tsv(score: ReconstructedScore, path: str | Path) -> Path:
             }
         )
     fieldnames = list(rows[0]) if rows else ["group_index"]
+    with output.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        writer.writerows(rows)
+    return output
+
+
+def write_staff_assignment_tsv(score: ReconstructedScore, path: str | Path) -> Path:
+    if score.piano_layout == "none":
+        raise ValueError("staff assignment diagnostics require piano layout optimization")
+    rows: list[dict[str, object]] = [
+        {
+            "source_index": note.source_index,
+            "pitch": note.pitch,
+            "onset_beats": fraction_text(note.onset_beats),
+            "duration_beats": fraction_text(note.duration_beats),
+            "hand": note.hand.value if note.hand is not None else None,
+            "staff": note.staff,
+            "chord_id": note.chord_id,
+            "assignment_cost": note.hand_assignment_cost,
+            "assignment_confidence": note.hand_assignment_confidence,
+            "previous_continuity_cost": note.previous_continuity_cost,
+            "next_continuity_cost": note.next_continuity_cost,
+            "tie_across_measure": note.tie_across_measure,
+        }
+        for note in score.notes
+    ]
+    return _write_rows_tsv(rows, path, "source_index")
+
+
+def write_voice_assignment_tsv(score: ReconstructedScore, path: str | Path) -> Path:
+    if score.piano_layout == "none":
+        raise ValueError("voice assignment diagnostics require piano layout optimization")
+    rows: list[dict[str, object]] = [
+        {
+            "source_index": note.source_index,
+            "pitch": note.pitch,
+            "onset_beats": fraction_text(note.onset_beats),
+            "duration_beats": fraction_text(note.duration_beats),
+            "hand": note.hand.value if note.hand is not None else None,
+            "staff": note.staff,
+            "voice": note.voice,
+            "chord_id": note.chord_id,
+            "assignment_cost": note.voice_assignment_cost,
+            "duration_changed": note.voice_duration_adjusted,
+            "original_duration_beats": fraction_text(note.original_duration_beats),
+            "tie_across_measure": note.tie_across_measure,
+        }
+        for note in score.notes
+    ]
+    return _write_rows_tsv(rows, path, "source_index")
+
+
+def _write_rows_tsv(rows: list[dict[str, object]], path: str | Path, empty_field: str) -> Path:
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(rows[0]) if rows else [empty_field]
     with output.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()

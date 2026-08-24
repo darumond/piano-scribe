@@ -26,7 +26,9 @@ from piano_transcriber.score.diagnostics import (
     write_joint_diagnostics_json,
     write_meter_hypotheses_tsv,
     write_rhythm_path_tsv,
+    write_staff_assignment_tsv,
     write_tempo_tsv,
+    write_voice_assignment_tsv,
 )
 from piano_transcriber.score.meter import (
     JointMeterConfig,
@@ -40,6 +42,12 @@ from piano_transcriber.score.rhythm import (
     RhythmOptimizerMode,
     RhythmSequenceConfig,
     RhythmSequenceWeights,
+)
+from piano_transcriber.score.separation import (
+    HandAssignmentWeights,
+    PianoLayoutMode,
+    PianoSeparationConfig,
+    VoiceAssignmentWeights,
 )
 from piano_transcriber.score.tempo import (
     ExplicitTempo,
@@ -166,6 +174,52 @@ def _add_score_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rhythm-pickup-weight", type=float, default=0.1)
     parser.add_argument("--rhythm-pattern-weight", type=float, default=0.45)
     parser.add_argument("--rhythm-duration-pattern-weight", type=float, default=0.2)
+    parser.add_argument(
+        "--piano-layout",
+        choices=[item.value for item in PianoLayoutMode],
+        default=PianoLayoutMode.NONE.value,
+        help="optional sequence-based piano hand, staff, and voice assignment",
+    )
+    parser.add_argument("--staff-assignment-tsv", type=Path)
+    parser.add_argument("--voice-assignment-tsv", type=Path)
+    parser.add_argument("--hand-split-pitch", type=int, default=60)
+    parser.add_argument("--hand-beam-size", type=int, default=64)
+    parser.add_argument("--hand-candidate-limit", type=int, default=16)
+    parser.add_argument("--hand-max-span", type=int, default=14)
+    parser.add_argument("--hand-large-jump", type=int, default=12)
+    parser.add_argument("--hand-compact-split-gap", type=int, default=7)
+    parser.add_argument("--hand-continuity-horizon", type=float, default=6.0)
+    parser.add_argument("--hand-register-weight", type=float, default=0.55)
+    parser.add_argument("--hand-continuity-weight", type=float, default=0.75)
+    parser.add_argument("--hand-large-jump-weight", type=float, default=0.85)
+    parser.add_argument("--hand-switch-weight", type=float, default=0.65)
+    parser.add_argument("--hand-crossing-weight", type=float, default=1.6)
+    parser.add_argument("--hand-chord-split-weight", type=float, default=0.8)
+    parser.add_argument("--hand-wide-span-weight", type=float, default=1.0)
+    parser.add_argument("--hand-load-weight", type=float, default=0.25)
+    parser.add_argument("--preferred-voices-per-staff", type=int, default=2)
+    parser.add_argument("--maximum-voices-per-staff", type=int, default=4)
+    parser.add_argument("--voice-beam-size", type=int, default=48)
+    parser.add_argument(
+        "--no-voice-duration-refinement",
+        action="store_false",
+        dest="voice_duration_refinement",
+        help="disable the voice-aware written-duration refinement pass",
+    )
+    parser.add_argument("--voice-duration-improvement-beats", type=float, default=0.25)
+    parser.add_argument(
+        "--minimum-explicit-rest-beats",
+        default="1/4",
+        help="smallest engraved rest in quarter-note beats; smaller gaps use cursor movement",
+    )
+    parser.add_argument("--voice-continuity-weight", type=float, default=0.8)
+    parser.add_argument("--voice-large-jump-weight", type=float, default=0.55)
+    parser.add_argument("--voice-overlap-weight", type=float, default=3.0)
+    parser.add_argument("--voice-crossing-weight", type=float, default=1.2)
+    parser.add_argument("--voice-switch-weight", type=float, default=0.65)
+    parser.add_argument("--voice-chord-split-weight", type=float, default=0.2)
+    parser.add_argument("--voice-secondary-weight", type=float, default=0.35)
+    parser.add_argument("--voice-additional-weight", type=float, default=1.1)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -228,6 +282,7 @@ def _run_transcribe(args: argparse.Namespace) -> int:
         and not args.track_beats
         and not args.infer_meter
         and args.rhythm_optimizer == RhythmOptimizerMode.LOCAL.value
+        and args.piano_layout == PianoLayoutMode.NONE.value
     ):
         if any(
             path is not None
@@ -239,6 +294,8 @@ def _run_transcribe(args: argparse.Namespace) -> int:
                 args.quantization_tsv,
                 args.meter_hypotheses_tsv,
                 args.rhythm_path_tsv,
+                args.staff_assignment_tsv,
+                args.voice_assignment_tsv,
             )
         ):
             raise ValueError("score diagnostics require --bpm")
@@ -314,6 +371,42 @@ def _score_config(
                 duration_pattern=args.rhythm_duration_pattern_weight,
             ),
         ),
+        piano_separation=PianoSeparationConfig(
+            mode=PianoLayoutMode(args.piano_layout),
+            split_pitch=args.hand_split_pitch,
+            hand_beam_size=args.hand_beam_size,
+            hand_candidate_limit=args.hand_candidate_limit,
+            maximum_hand_span_semitones=args.hand_max_span,
+            large_jump_semitones=args.hand_large_jump,
+            compact_split_gap_semitones=args.hand_compact_split_gap,
+            continuity_horizon_beats=args.hand_continuity_horizon,
+            preferred_voices_per_staff=args.preferred_voices_per_staff,
+            maximum_voices_per_staff=args.maximum_voices_per_staff,
+            voice_beam_size=args.voice_beam_size,
+            voice_duration_refinement=args.voice_duration_refinement,
+            duration_improvement_beats=args.voice_duration_improvement_beats,
+            minimum_explicit_rest_beats=Fraction(args.minimum_explicit_rest_beats),
+            hand_weights=HandAssignmentWeights(
+                register=args.hand_register_weight,
+                continuity=args.hand_continuity_weight,
+                large_jump=args.hand_large_jump_weight,
+                hand_switch=args.hand_switch_weight,
+                crossing=args.hand_crossing_weight,
+                compact_chord_split=args.hand_chord_split_weight,
+                wide_span=args.hand_wide_span_weight,
+                hand_load=args.hand_load_weight,
+            ),
+            voice_weights=VoiceAssignmentWeights(
+                continuity=args.voice_continuity_weight,
+                large_jump=args.voice_large_jump_weight,
+                overlap=args.voice_overlap_weight,
+                crossing=args.voice_crossing_weight,
+                voice_switch=args.voice_switch_weight,
+                split_chord=args.voice_chord_split_weight,
+                secondary_voice=args.voice_secondary_weight,
+                additional_voice=args.voice_additional_weight,
+            ),
+        ),
     )
 
 
@@ -344,6 +437,10 @@ def _reconstruct(
             local_meter_config = replace(
                 config,
                 rhythm_optimizer=RhythmOptimizerMode.LOCAL,
+                piano_separation=replace(
+                    config.piano_separation,
+                    mode=PianoLayoutMode.NONE,
+                ),
             )
             joint = infer_joint_meter_score(
                 result,
@@ -364,7 +461,10 @@ def _reconstruct(
                     ),
                 ),
             )
-            if config.rhythm_optimizer is RhythmOptimizerMode.SEQUENCE:
+            if (
+                config.rhythm_optimizer is RhythmOptimizerMode.SEQUENCE
+                or config.piano_separation.mode is PianoLayoutMode.SEQUENCE
+            ):
                 selected_config = replace(
                     config,
                     bpm=joint.best.pulse_bpm,
@@ -410,6 +510,10 @@ def _write_score_outputs(
         and score.rhythm_optimizer != RhythmOptimizerMode.SEQUENCE.value
     ):
         raise ValueError("rhythm path diagnostics require --rhythm-optimizer sequence")
+    if score.piano_layout == PianoLayoutMode.NONE.value and (
+        args.staff_assignment_tsv is not None or args.voice_assignment_tsv is not None
+    ):
+        raise ValueError("staff and voice diagnostics require --piano-layout sequence")
     if args.midi is not None:
         write_score_midi(score, args.midi)
         logger.info("Wrote reconstructed MIDI to %s", args.midi)
@@ -442,6 +546,12 @@ def _write_score_outputs(
     if args.rhythm_path_tsv is not None:
         write_rhythm_path_tsv(score, args.rhythm_path_tsv)
         logger.info("Wrote rhythm path TSV to %s", args.rhythm_path_tsv)
+    if args.staff_assignment_tsv is not None:
+        write_staff_assignment_tsv(score, args.staff_assignment_tsv)
+        logger.info("Wrote staff assignment TSV to %s", args.staff_assignment_tsv)
+    if args.voice_assignment_tsv is not None:
+        write_voice_assignment_tsv(score, args.voice_assignment_tsv)
+        logger.info("Wrote voice assignment TSV to %s", args.voice_assignment_tsv)
 
 
 def _run_analyze_score(args: argparse.Namespace) -> int:
@@ -475,6 +585,13 @@ def _run_analyze_score(args: argparse.Namespace) -> int:
         print(
             f"Rhythm optimizer: sequence; {score.rhythm_optimizer_seconds:.3f} s, "
             f"{score.rhythm_evaluated_transitions} transitions"
+        )
+    if score.piano_layout == PianoLayoutMode.SEQUENCE.value:
+        print(
+            f"Piano layout: sequence; hands {score.hand_optimizer_seconds:.3f} s / "
+            f"{score.hand_evaluated_transitions} transitions, voices "
+            f"{score.voice_optimizer_seconds:.3f} s / "
+            f"{score.voice_evaluated_transitions} transitions"
         )
     return 0
 

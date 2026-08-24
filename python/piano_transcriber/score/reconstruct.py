@@ -22,6 +22,7 @@ from piano_transcriber.score.rhythm import (
     RhythmSequenceConfig,
     optimize_rhythm_sequence,
 )
+from piano_transcriber.score.separation import PianoSeparationConfig, separate_piano_score
 from piano_transcriber.score.tempo import beats_to_seconds, seconds_to_beats
 from piano_transcriber.score.tracking import BeatTrack
 from piano_transcriber.score.types import (
@@ -53,6 +54,7 @@ class ReconstructionConfig:
     downbeat_position_beats: float | None = None
     rhythm_optimizer: RhythmOptimizerMode = RhythmOptimizerMode.LOCAL
     rhythm_sequence: RhythmSequenceConfig = field(default_factory=RhythmSequenceConfig)
+    piano_separation: PianoSeparationConfig = field(default_factory=PianoSeparationConfig)
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.bpm) or self.bpm <= 0.0:
@@ -551,7 +553,7 @@ def reconstruct_score(
             )
     score_pedals = tuple(score_pedals_list)
     ordered_diagnostics = tuple(diagnostics[index] for index in sorted(diagnostics))
-    return ReconstructedScore(
+    base_score = ReconstructedScore(
         bpm=config.bpm,
         time_signature=config.time_signature,
         grid_name="adaptive" if config.adaptive_quantization else config.grid.value,
@@ -577,6 +579,7 @@ def reconstruct_score(
             rhythm_result.evaluated_transitions if rhythm_result is not None else 0
         ),
     )
+    return separate_piano_score(base_score, config.piano_separation)
 
 
 def _score_alignment(

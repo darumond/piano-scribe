@@ -16,15 +16,33 @@ from piano_transcriber.score.rhythm import (
     RhythmSequenceConfig,
     RhythmSequenceWeights,
 )
+from piano_transcriber.score.separation import (
+    HandAssignmentWeights,
+    PianoLayoutMode,
+    PianoSeparationConfig,
+    VoiceAssignmentWeights,
+    separate_piano_score,
+)
 from piano_transcriber.score.tracking import BeatTrack, BeatTracker, SymbolicOnsetBeatTracker
-from piano_transcriber.score.types import ReconstructedScore, ScoreChord, ScoreNote, TimeSignature
+from piano_transcriber.score.types import (
+    PianoHand,
+    ReconstructedScore,
+    ScoreChord,
+    ScoreNote,
+    ScoreRest,
+    TimeSignature,
+)
 
 __all__ = [
     "BeatTrack",
     "BeatTracker",
+    "HandAssignmentWeights",
     "JointMeterConfig",
     "JointMeterResult",
     "JointMeterWeights",
+    "PianoHand",
+    "PianoLayoutMode",
+    "PianoSeparationConfig",
     "QuantizationGrid",
     "ReconstructedScore",
     "ReconstructionConfig",
@@ -33,8 +51,11 @@ __all__ = [
     "RhythmSequenceWeights",
     "ScoreChord",
     "ScoreNote",
+    "ScoreRest",
     "SymbolicOnsetBeatTracker",
     "TimeSignature",
+    "VoiceAssignmentWeights",
     "infer_joint_meter_score",
     "reconstruct_score",
+    "separate_piano_score",
 ]

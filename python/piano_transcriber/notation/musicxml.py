@@ -10,7 +10,7 @@ from pathlib import Path
 
 from piano_transcriber.score.beats import locate_score_measure
 from piano_transcriber.score.quantize import WRITTEN_DURATIONS
-from piano_transcriber.score.types import ReconstructedScore, ScoreNote
+from piano_transcriber.score.types import ReconstructedScore, ScoreNote, ScoreRest
 from piano_transcriber.transcription.types import NoteEvent, TranscriptionResult
 
 _SPLIT_DURATIONS = tuple(sorted((*WRITTEN_DURATIONS, Fraction(1, 24), Fraction(1, 48))))
@@ -110,6 +110,14 @@ class _NoteSegment:
     tie_start: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _RestSegment:
+    rest: ScoreRest
+    measure_index: int
+    onset_in_measure: Fraction
+    duration: Fraction
+
+
 def _segments(score: ReconstructedScore) -> tuple[_NoteSegment, ...]:
     segments: list[_NoteSegment] = []
     for note in score.notes:
@@ -142,6 +150,34 @@ def _segments(score: ReconstructedScore) -> tuple[_NoteSegment, ...]:
                 position += conventional
                 onset += conventional
                 first = False
+    return tuple(segments)
+
+
+def _rest_segments(score: ReconstructedScore) -> tuple[_RestSegment, ...]:
+    segments: list[_RestSegment] = []
+    for rest in score.rests:
+        position = rest.onset_beats
+        remaining = rest.duration_beats
+        while remaining > 0:
+            measure_index, onset, measure_length = locate_score_measure(
+                position,
+                score.time_signature,
+                score.pickup_beats,
+            )
+            measure_remaining = min(remaining, measure_length - onset)
+            while measure_remaining > 0:
+                if measure_remaining < score.minimum_explicit_rest_beats:
+                    position += measure_remaining
+                    remaining -= measure_remaining
+                    break
+                conventional = max(
+                    duration for duration in _SPLIT_DURATIONS if duration <= measure_remaining
+                )
+                remaining -= conventional
+                measure_remaining -= conventional
+                segments.append(_RestSegment(rest, measure_index, onset, conventional))
+                position += conventional
+                onset += conventional
     return tuple(segments)
 
 
@@ -182,7 +218,7 @@ def _append_score_note(
         ET.SubElement(element, "chord")
     _append_pitch(element, segment.note)
     ET.SubElement(element, "duration").text = str(int(segment.duration * divisions))
-    ET.SubElement(element, "voice").text = "1"
+    ET.SubElement(element, "voice").text = str(segment.note.voice)
     note_type, dots, time_modification = _duration_notation(segment.duration)
     ET.SubElement(element, "type").text = note_type
     for _ in range(dots):
@@ -202,6 +238,29 @@ def _append_score_note(
             ET.SubElement(notations, "tied", type="stop")
         if segment.tie_start:
             ET.SubElement(notations, "tied", type="start")
+    ET.SubElement(element, "staff").text = str(segment.note.staff)
+
+
+def _append_score_rest(
+    measure: ET.Element,
+    segment: _RestSegment,
+    *,
+    divisions: int,
+) -> None:
+    element = ET.SubElement(measure, "note")
+    ET.SubElement(element, "rest")
+    ET.SubElement(element, "duration").text = str(int(segment.duration * divisions))
+    ET.SubElement(element, "voice").text = str(segment.rest.voice)
+    note_type, dots, time_modification = _duration_notation(segment.duration)
+    ET.SubElement(element, "type").text = note_type
+    for _ in range(dots):
+        ET.SubElement(element, "dot")
+    if time_modification is not None:
+        actual, normal = time_modification
+        modification = ET.SubElement(element, "time-modification")
+        ET.SubElement(modification, "actual-notes").text = str(actual)
+        ET.SubElement(modification, "normal-notes").text = str(normal)
+    ET.SubElement(element, "staff").text = str(segment.rest.staff)
 
 
 def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
@@ -209,10 +268,13 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     segments = _segments(score)
+    rest_segments = _rest_segments(score)
     divisions = lcm(
         24,
         *(segment.onset_in_measure.denominator for segment in segments),
         *(segment.duration.denominator for segment in segments),
+        *(segment.onset_in_measure.denominator for segment in rest_segments),
+        *(segment.duration.denominator for segment in rest_segments),
     )
 
     root = ET.Element("score-partwise", version="4.0")
@@ -226,6 +288,12 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
     by_measure: dict[int, list[_NoteSegment]] = {}
     for segment in segments:
         by_measure.setdefault(segment.measure_index, []).append(segment)
+    rests_by_measure: dict[int, list[_RestSegment]] = {}
+    for rest_segment in rest_segments:
+        rests_by_measure.setdefault(rest_segment.measure_index, []).append(rest_segment)
+    staff_count = (
+        2 if score.piano_layout != "none" else max((note.staff for note in score.notes), default=1)
+    )
     for measure_index in range(score.measure_count):
         is_pickup = score.pickup_beats > 0 and measure_index == 0
         measure_number = (
@@ -239,16 +307,20 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
         if measure_index == 0:
             attributes = ET.SubElement(measure, "attributes")
             ET.SubElement(attributes, "divisions").text = str(divisions)
-            key = ET.SubElement(attributes, "key")
-            ET.SubElement(key, "fifths").text = "0"
+            key_signature = ET.SubElement(attributes, "key")
+            ET.SubElement(key_signature, "fifths").text = "0"
             time = ET.SubElement(attributes, "time")
             ET.SubElement(time, "beats").text = str(score.time_signature.numerator)
             ET.SubElement(time, "beat-type").text = str(score.time_signature.denominator)
             staves = ET.SubElement(attributes, "staves")
-            staves.text = "1"
-            clef = ET.SubElement(attributes, "clef")
-            ET.SubElement(clef, "sign").text = "G"
-            ET.SubElement(clef, "line").text = "2"
+            staves.text = str(staff_count)
+            treble_clef = ET.SubElement(attributes, "clef", number="1")
+            ET.SubElement(treble_clef, "sign").text = "G"
+            ET.SubElement(treble_clef, "line").text = "2"
+            if staff_count == 2:
+                bass_clef = ET.SubElement(attributes, "clef", number="2")
+                ET.SubElement(bass_clef, "sign").text = "F"
+                ET.SubElement(bass_clef, "line").text = "4"
             direction = ET.SubElement(measure, "direction", placement="above")
             direction_type = ET.SubElement(direction, "direction-type")
             metronome = ET.SubElement(direction_type, "metronome")
@@ -279,26 +351,57 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
             score.pickup_beats if is_pickup else score.time_signature.measure_beats
         )
         measure_length_ticks = int(current_measure_beats * divisions)
-        grouped: dict[Fraction, list[_NoteSegment]] = {}
-        for segment in measure_segments:
-            grouped.setdefault(segment.onset_in_measure, []).append(segment)
-        cursor_ticks = 0
-        for onset, chord_segments in sorted(grouped.items()):
-            onset_ticks = int(onset * divisions)
-            movement = onset_ticks - cursor_ticks
-            if movement > 0:
-                forward = ET.SubElement(measure, "forward")
-                ET.SubElement(forward, "duration").text = str(movement)
-            elif movement < 0:
+        grouped: dict[tuple[int, int], dict[Fraction, list[_NoteSegment]]] = {}
+        for note_segment in measure_segments:
+            assignment = (note_segment.note.staff, note_segment.note.voice)
+            grouped.setdefault(assignment, {}).setdefault(note_segment.onset_in_measure, []).append(
+                note_segment
+            )
+        grouped_rests: dict[tuple[int, int], dict[Fraction, list[_RestSegment]]] = {}
+        for rest_segment in rests_by_measure.get(measure_index, []):
+            assignment = (rest_segment.rest.staff, rest_segment.rest.voice)
+            grouped_rests.setdefault(assignment, {}).setdefault(
+                rest_segment.onset_in_measure, []
+            ).append(rest_segment)
+        stream_keys = sorted(set(grouped) | set(grouped_rests))
+        for stream_index, stream_key in enumerate(stream_keys):
+            if stream_index > 0:
                 backup = ET.SubElement(measure, "backup")
-                ET.SubElement(backup, "duration").text = str(-movement)
-            ordered = sorted(chord_segments, key=lambda item: (-item.duration, item.note.pitch))
-            for index, segment in enumerate(ordered):
-                _append_score_note(measure, segment, divisions=divisions, chord=index > 0)
-            cursor_ticks = onset_ticks + int(ordered[0].duration * divisions)
-        if cursor_ticks < measure_length_ticks:
-            forward = ET.SubElement(measure, "forward")
-            ET.SubElement(forward, "duration").text = str(measure_length_ticks - cursor_ticks)
+                ET.SubElement(backup, "duration").text = str(measure_length_ticks)
+            note_onsets = grouped.get(stream_key, {})
+            rest_onsets = grouped_rests.get(stream_key, {})
+            cursor_ticks = 0
+            for onset in sorted(set(note_onsets) | set(rest_onsets)):
+                onset_ticks = int(onset * divisions)
+                if onset_ticks > cursor_ticks:
+                    forward = ET.SubElement(measure, "forward")
+                    ET.SubElement(forward, "duration").text = str(onset_ticks - cursor_ticks)
+                for rest_segment in rest_onsets.get(onset, []):
+                    _append_score_rest(measure, rest_segment, divisions=divisions)
+                    cursor_ticks = max(
+                        cursor_ticks,
+                        onset_ticks + int(rest_segment.duration * divisions),
+                    )
+                chord_segments = note_onsets.get(onset, [])
+                ordered = sorted(
+                    chord_segments,
+                    key=lambda item: (-item.duration, item.note.pitch),
+                )
+                for index, note_segment in enumerate(ordered):
+                    _append_score_note(
+                        measure,
+                        note_segment,
+                        divisions=divisions,
+                        chord=index > 0,
+                    )
+                if ordered:
+                    cursor_ticks = max(
+                        cursor_ticks,
+                        onset_ticks + int(ordered[0].duration * divisions),
+                    )
+            if cursor_ticks < measure_length_ticks:
+                forward = ET.SubElement(measure, "forward")
+                ET.SubElement(forward, "duration").text = str(measure_length_ticks - cursor_ticks)
 
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ")

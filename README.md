@@ -26,8 +26,8 @@ The included backends are:
 
 Raw MusicXML output remains available when no tempo is supplied. When score reconstruction is
 enabled, acoustic events are converted to exact quarter-note units, quantized, grouped into chords,
-and written into measures with conventional note values. The first reconstruction layer does not
-yet perform voice allocation, staff separation, or sophisticated engraving.
+and written into measures with conventional note values. An optional post-rhythm stage assigns
+piano hands, treble/bass staves, and within-staff voices before producing grand-staff MusicXML.
 
 ## Requirements and installation
 
@@ -230,6 +230,57 @@ size, and optimizer-runtime aggregates. During `--infer-meter`, meter selection 
 the local quantizer first; sequence optimization is then applied to the selected hypothesis so a
 local-versus-sequence comparison does not silently change the meter experiment.
 
+### Piano hand, staff, and voice separation
+
+Hand and voice inference is a separate post-rhythm stage and is disabled by default. Enable its
+bounded deterministic search with `--piano-layout sequence`:
+
+```bash
+piano-scribe analyze-score transcription.json \
+  --infer-meter \
+  --rhythm-optimizer sequence \
+  --piano-layout sequence \
+  --midi score.mid \
+  --musicxml score.musicxml \
+  --staff-assignment-tsv staff-assignment.tsv \
+  --voice-assignment-tsv voice-assignment.tsv \
+  --diagnostics-json diagnostics.json
+```
+
+Each onset group retains joint hand candidates: all-left, all-right, register-ordered chord splits,
+and bounded crossing alternatives. A beam of 64 paths combines the configurable middle-C register
+prior with melodic continuity, large-jump, rapid hand-switch, crossing, compact-chord-split,
+wide-span, and hand-load costs. Register is only a prior: continuity can keep a right-hand line below
+the split pitch or a left-hand line above it. Configure search bounds with `--hand-beam-size`,
+`--hand-candidate-limit`, and the `--hand-*-weight` options.
+
+Default hand weights are register `0.55`, continuity `0.75`, large jump `0.85`, hand switch `0.65`,
+crossing `1.6`, compact-chord split `0.8`, wide span `1.0`, and excess hand load `0.25`. Default
+voice weights are continuity `0.8`, large jump `0.55`, overlap `3.0`, crossing `1.2`, identity
+switch `0.65`, chord split `0.2`, first use of the secondary voice `0.35`, and additional voices
+`1.1`. Each is configurable through its corresponding `--hand-*-weight` or `--voice-*-weight`
+option; they are generic priors rather than composition-specific settings.
+
+Within each staff, a second beam assigns coherent voices using pitch continuity, active written
+durations, chord membership, overlap, crossing, voice-switch, and additional-voice costs. Two voices
+per staff are preferred; up to four are available when overlapping durations require them. A
+post-assignment refinement may restore a longer written duration when another voice explains the
+overlap, but pedal-marked acoustic sustain is not used for that extension. Disable this pass with
+`--no-voice-duration-refinement`.
+
+Layout-aware MusicXML declares two staves with fixed treble and bass clefs, emits staff and voice
+numbers on every event, splits chords within the appropriate stream, and uses explicit rests plus
+`backup` semantics so every emitted voice is rhythmically complete inside its measure. Dynamic clef
+changes, cross-staff beaming, fingering, and advanced engraving remain outside this stage.
+Gaps shorter than the configurable `--minimum-explicit-rest-beats` default of `1/4` are represented
+with cursor movement instead of tiny engraved rests.
+
+`staff-assignment.tsv` and `voice-assignment.tsv` preserve raw source identity, exact onset and
+duration, chord identity, assignments, costs, confidence, continuity evidence, tie boundaries, and
+voice-aware duration changes. JSON diagnostics also summarize hand/staff counts, voice counts and
+switches, crossings, melodic intervals, hand spans, split chords, explicit rests, search sizes, and
+optimizer runtimes.
+
 Very short acoustic events are retained by default and receive a suspicious-event diagnostic.
 Use `--min-note-duration-ms 30` to opt into filtering; every filtered or merged event remains in the
 JSON/TSV diagnostics. The current pedal heuristic prevents a pedal-overlapped acoustic offset from
@@ -318,7 +369,7 @@ python/piano_transcriber/    Installable Python package
   audio/                     Loading and preprocessing
   models/                    Backend interface and adapters
   transcription/             Domain types, postprocessing, pipeline
-  score/                     Exact beat timing, quantization, chords, and diagnostics
+  score/                     Rhythm, piano layout, chords, voices, rests, and diagnostics
   midi/                      MIDI serialization
   notation/                  MusicXML serialization
 tests/unit/                  Focused Python tests
@@ -331,6 +382,7 @@ benchmarks/                  Python/native DSP comparison scaffold
 1. Audio → mock transcription → MIDI/MusicXML.
 2. Integrate a pretrained piano transcription model and validate it on a representative corpus.
 3. Add tempo estimation and rhythm quantization.
-4. Separate left- and right-hand voices.
-5. Fine-tune on MAESTRO or another licensed piano dataset.
-6. Experiment with a purpose-built PyTorch or JAX architecture.
+4. Separate piano hands, staves, and voices with traceable sequence heuristics.
+5. Improve engraving, key spelling, and layout using evaluated score corpora.
+6. Fine-tune on MAESTRO or another licensed piano dataset.
+7. Experiment with a purpose-built PyTorch or JAX architecture.
