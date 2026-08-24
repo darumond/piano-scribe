@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 from collections.abc import Sequence
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from piano_transcriber.score.diagnostics import (
     write_diagnostics_tsv,
     write_joint_diagnostics_json,
     write_meter_hypotheses_tsv,
+    write_rhythm_path_tsv,
     write_tempo_tsv,
 )
 from piano_transcriber.score.meter import (
@@ -34,6 +36,11 @@ from piano_transcriber.score.meter import (
 )
 from piano_transcriber.score.quantize import QuantizationGrid
 from piano_transcriber.score.reconstruct import ReconstructionConfig, reconstruct_score
+from piano_transcriber.score.rhythm import (
+    RhythmOptimizerMode,
+    RhythmSequenceConfig,
+    RhythmSequenceWeights,
+)
 from piano_transcriber.score.tempo import (
     ExplicitTempo,
     MedianInterOnsetTempoEstimator,
@@ -132,6 +139,33 @@ def _add_score_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--meter-tie-weight", type=float, default=0.12)
     parser.add_argument("--meter-pickup-weight", type=float, default=0.12)
     parser.add_argument("--meter-tempo-level-weight", type=float, default=0.08)
+    parser.add_argument(
+        "--rhythm-optimizer",
+        choices=[item.value for item in RhythmOptimizerMode],
+        default=RhythmOptimizerMode.LOCAL.value,
+        help="local candidate selection or bounded phrase-level sequence optimization",
+    )
+    parser.add_argument("--rhythm-path-tsv", type=Path, help="selected rhythm path report")
+    parser.add_argument("--rhythm-candidate-limit", type=int, default=5)
+    parser.add_argument("--rhythm-candidate-window-ms", type=float, default=55.0)
+    parser.add_argument("--rhythm-duration-candidate-limit", type=int, default=4)
+    parser.add_argument("--rhythm-duration-window-ms", type=float, default=200.0)
+    parser.add_argument("--rhythm-beam-size", type=int, default=64)
+    parser.add_argument("--rhythm-onset-weight", type=float, default=1.0)
+    parser.add_argument("--rhythm-duration-weight", type=float, default=0.6)
+    parser.add_argument("--rhythm-notation-weight", type=float, default=0.65)
+    parser.add_argument("--rhythm-family-switch-weight", type=float, default=0.35)
+    parser.add_argument("--rhythm-triplet-switch-weight", type=float, default=0.9)
+    parser.add_argument("--rhythm-isolated-triplet-weight", type=float, default=0.65)
+    parser.add_argument("--rhythm-dotted-weight", type=float, default=0.65)
+    parser.add_argument("--rhythm-thirty-second-weight", type=float, default=0.65)
+    parser.add_argument("--rhythm-short-value-weight", type=float, default=0.4)
+    parser.add_argument("--rhythm-tie-weight", type=float, default=0.25)
+    parser.add_argument("--rhythm-tiny-tie-weight", type=float, default=0.8)
+    parser.add_argument("--rhythm-metric-weight", type=float, default=0.12)
+    parser.add_argument("--rhythm-pickup-weight", type=float, default=0.1)
+    parser.add_argument("--rhythm-pattern-weight", type=float, default=0.45)
+    parser.add_argument("--rhythm-duration-pattern-weight", type=float, default=0.2)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -188,7 +222,13 @@ def _run_transcribe(args: argparse.Namespace) -> int:
         checkpoint_path=args.checkpoint,
         device=args.device,
     )
-    if args.bpm is None and not args.estimate_bpm and not args.track_beats and not args.infer_meter:
+    if (
+        args.bpm is None
+        and not args.estimate_bpm
+        and not args.track_beats
+        and not args.infer_meter
+        and args.rhythm_optimizer == RhythmOptimizerMode.LOCAL.value
+    ):
         if any(
             path is not None
             for path in (
@@ -198,6 +238,7 @@ def _run_transcribe(args: argparse.Namespace) -> int:
                 args.tempo_tsv,
                 args.quantization_tsv,
                 args.meter_hypotheses_tsv,
+                args.rhythm_path_tsv,
             )
         ):
             raise ValueError("score diagnostics require --bpm")
@@ -248,6 +289,31 @@ def _score_config(
         time_signature=TimeSignature.parse(args.time_signature),
         infer_pickup=args.track_beats or args.infer_meter,
         pickup_beats=(Fraction(args.pickup_beats) if args.pickup_beats is not None else None),
+        rhythm_optimizer=RhythmOptimizerMode(args.rhythm_optimizer),
+        rhythm_sequence=RhythmSequenceConfig(
+            candidate_limit=args.rhythm_candidate_limit,
+            candidate_window_ms=args.rhythm_candidate_window_ms,
+            duration_candidate_limit=args.rhythm_duration_candidate_limit,
+            duration_candidate_window_ms=args.rhythm_duration_window_ms,
+            beam_size=args.rhythm_beam_size,
+            weights=RhythmSequenceWeights(
+                onset_timing=args.rhythm_onset_weight,
+                duration_timing=args.rhythm_duration_weight,
+                notation_complexity=args.rhythm_notation_weight,
+                family_switch=args.rhythm_family_switch_weight,
+                straight_triplet_switch=args.rhythm_triplet_switch_weight,
+                isolated_triplet=args.rhythm_isolated_triplet_weight,
+                dotted_micro_value=args.rhythm_dotted_weight,
+                thirty_second_value=args.rhythm_thirty_second_weight,
+                unusual_short_value=args.rhythm_short_value_weight,
+                tie=args.rhythm_tie_weight,
+                tiny_tie_fragment=args.rhythm_tiny_tie_weight,
+                metric_accent=args.rhythm_metric_weight,
+                pickup_plausibility=args.rhythm_pickup_weight,
+                pattern_consistency=args.rhythm_pattern_weight,
+                duration_pattern=args.rhythm_duration_pattern_weight,
+            ),
+        ),
     )
 
 
@@ -275,10 +341,14 @@ def _reconstruct(
             adaptive=True,
         )
         if args.infer_meter:
+            local_meter_config = replace(
+                config,
+                rhythm_optimizer=RhythmOptimizerMode.LOCAL,
+            )
             joint = infer_joint_meter_score(
                 result,
                 beat_track,
-                config,
+                local_meter_config,
                 JointMeterConfig(
                     minimum_bpm=args.minimum_bpm,
                     maximum_bpm=args.maximum_bpm,
@@ -294,17 +364,35 @@ def _reconstruct(
                     ),
                 ),
             )
+            if config.rhythm_optimizer is RhythmOptimizerMode.SEQUENCE:
+                selected_config = replace(
+                    config,
+                    bpm=joint.best.pulse_bpm,
+                    time_signature=joint.best.time_signature,
+                    infer_pickup=True,
+                    pickup_beats=joint.best.pickup_beats,
+                    downbeat_position_beats=float(joint.best.downbeat_phase_beats),
+                )
+                selected_score = reconstruct_score(
+                    result,
+                    selected_config,
+                    beat_track=joint.score.beat_track,
+                )
+                joint = replace(joint, score=selected_score)
             return joint.score, joint
     else:
         config = _score_config(args, result)
-        if args.bpm is not None and (
-            args.first_beat is not None
-            or args.first_downbeat is not None
-            or args.pickup_beats is not None
+        if config.rhythm_optimizer is RhythmOptimizerMode.SEQUENCE or (
+            args.bpm is not None
+            and (
+                args.first_beat is not None
+                or args.first_downbeat is not None
+                or args.pickup_beats is not None
+            )
         ):
             beat_track = fixed_beat_track(
                 result.audio_duration_seconds,
-                args.bpm,
+                config.bpm,
                 time_signature=signature,
                 first_beat_seconds=args.first_beat or 0.0,
                 first_downbeat_seconds=args.first_downbeat,
@@ -317,6 +405,11 @@ def _write_score_outputs(
     args: argparse.Namespace,
     joint_result: JointMeterResult | None = None,
 ) -> None:
+    if (
+        args.rhythm_path_tsv is not None
+        and score.rhythm_optimizer != RhythmOptimizerMode.SEQUENCE.value
+    ):
+        raise ValueError("rhythm path diagnostics require --rhythm-optimizer sequence")
     if args.midi is not None:
         write_score_midi(score, args.midi)
         logger.info("Wrote reconstructed MIDI to %s", args.midi)
@@ -346,6 +439,9 @@ def _write_score_outputs(
             raise ValueError("meter hypothesis output requires --infer-meter")
         write_meter_hypotheses_tsv(joint_result, args.meter_hypotheses_tsv)
         logger.info("Wrote meter hypothesis TSV to %s", args.meter_hypotheses_tsv)
+    if args.rhythm_path_tsv is not None:
+        write_rhythm_path_tsv(score, args.rhythm_path_tsv)
+        logger.info("Wrote rhythm path TSV to %s", args.rhythm_path_tsv)
 
 
 def _run_analyze_score(args: argparse.Namespace) -> int:
@@ -375,6 +471,11 @@ def _run_analyze_score(args: argparse.Namespace) -> int:
             f"hypothesis confidence margin: {joint_result.confidence_margin:.4f}"
         )
         print(f"Pickup: {joint_result.best.pickup_beats} quarter-note beats")
+    if score.rhythm_optimizer == RhythmOptimizerMode.SEQUENCE.value:
+        print(
+            f"Rhythm optimizer: sequence; {score.rhythm_optimizer_seconds:.3f} s, "
+            f"{score.rhythm_evaluated_transitions} transitions"
+        )
     return 0
 
 

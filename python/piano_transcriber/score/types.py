@@ -119,6 +119,18 @@ class QuantizationCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class DurationCandidate:
+    duration_beats: Fraction
+    timing_error_seconds: float
+    complexity_penalty: float
+    requires_tie: bool
+    tiny_tie_fragment: bool
+    dotted_micro_value: bool
+    unusual_short_value: bool
+    total_score: float
+
+
+@dataclass(frozen=True, slots=True)
 class EventDiagnostic:
     source_index: int
     pitch: int
@@ -134,6 +146,20 @@ class EventDiagnostic:
     continuous_onset_beats: float | None = None
     selected_subdivision: str | None = None
     quantization_candidates: tuple[QuantizationCandidate, ...] = ()
+    duration_candidates: tuple[DurationCandidate, ...] = ()
+    rhythm_group_index: int | None = None
+    selected_rhythm_family: str | None = None
+    rhythm_metric_position_beats: Fraction | None = None
+    rhythm_requires_tie: bool = False
+    rhythm_group_timing_error_seconds: float | None = None
+    rhythm_complexity_cost: float | None = None
+    rhythm_local_cost: float | None = None
+    rhythm_transition_cost: float | None = None
+    rhythm_cumulative_score: float | None = None
+    local_best_subdivision: str | None = None
+    local_best_position_beats: Fraction | None = None
+    optimizer_selection_reason: str | None = None
+    optimizer_changed_local_choice: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +177,9 @@ class ReconstructedScore:
     pickup_beats: Fraction = Fraction(0)
     first_full_downbeat_beats: Fraction = Fraction(0)
     beat_position_offset: float = 0.0
+    rhythm_optimizer: str = "local"
+    rhythm_optimizer_seconds: float = 0.0
+    rhythm_evaluated_transitions: int = 0
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.bpm) or self.bpm <= 0.0:

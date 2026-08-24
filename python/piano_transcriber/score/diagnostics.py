@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import csv
 import json
+import statistics
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict
 from fractions import Fraction
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
 
@@ -122,6 +124,19 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
                     }
                     for candidate in diagnostic.quantization_candidates
                 ],
+                "duration_candidates": [
+                    {
+                        "duration_beats": fraction_text(candidate.duration_beats),
+                        "timing_error_ms": candidate.timing_error_seconds * 1000.0,
+                        "complexity_penalty": candidate.complexity_penalty,
+                        "requires_tie": candidate.requires_tie,
+                        "tiny_tie_fragment": candidate.tiny_tie_fragment,
+                        "dotted_micro_value": candidate.dotted_micro_value,
+                        "unusual_short_value": candidate.unusual_short_value,
+                        "total_score": candidate.total_score,
+                    }
+                    for candidate in diagnostic.duration_candidates
+                ],
                 "written_duration_beats": fraction_text(diagnostic.written_duration_beats),
                 "written_duration_name": (
                     duration_name(diagnostic.written_duration_beats)
@@ -137,6 +152,25 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
                 "pedal_duration_shortened": diagnostic.pedal_duration_shortened,
                 "velocity": note.velocity if note is not None else None,
                 "confidence": note.confidence if note is not None else None,
+                "rhythm_group_index": diagnostic.rhythm_group_index,
+                "selected_rhythm_family": diagnostic.selected_rhythm_family,
+                "rhythm_metric_position_beats": fraction_text(
+                    diagnostic.rhythm_metric_position_beats
+                ),
+                "rhythm_requires_tie": diagnostic.rhythm_requires_tie,
+                "rhythm_group_timing_error_ms": (
+                    diagnostic.rhythm_group_timing_error_seconds * 1000.0
+                    if diagnostic.rhythm_group_timing_error_seconds is not None
+                    else None
+                ),
+                "rhythm_complexity_cost": diagnostic.rhythm_complexity_cost,
+                "rhythm_local_cost": diagnostic.rhythm_local_cost,
+                "rhythm_transition_cost": diagnostic.rhythm_transition_cost,
+                "rhythm_cumulative_score": diagnostic.rhythm_cumulative_score,
+                "local_best_subdivision": diagnostic.local_best_subdivision,
+                "local_best_position_beats": fraction_text(diagnostic.local_best_position_beats),
+                "optimizer_selection_reason": diagnostic.optimizer_selection_reason,
+                "optimizer_changed_local_choice": diagnostic.optimizer_changed_local_choice,
             }
         )
     action_counts = Counter(item.action for item in score.diagnostics)
@@ -177,8 +211,117 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
             "maximum": errors[-1] if errors else 0.0,
         },
         "beat_tracking": beat_summary,
+        "rhythm_optimization": rhythm_optimization_data(score),
         "events": events,
     }
+
+
+def rhythm_optimization_data(score: ReconstructedScore) -> dict[str, object]:
+    grouped = {
+        item.rhythm_group_index: item
+        for item in score.diagnostics
+        if item.action == "quantized" and item.rhythm_group_index is not None
+    }
+    ordered = [grouped[index] for index in sorted(grouped)]
+    families = [item.selected_rhythm_family or "" for item in ordered]
+    ternary = ["triplet" in family for family in families]
+    group_errors = sorted(
+        abs(item.rhythm_group_timing_error_seconds) * 1000.0
+        for item in ordered
+        if item.rhythm_group_timing_error_seconds is not None
+    )
+    family_switches = sum(later != earlier for earlier, later in pairwise(families))
+    ternary_switches = sum(later != earlier for earlier, later in pairwise(ternary))
+    isolated_triplets = sum(
+        is_triplet
+        and (index == 0 or not ternary[index - 1])
+        and (index + 1 == len(ternary) or not ternary[index + 1])
+        for index, is_triplet in enumerate(ternary)
+    )
+    tie_count = sum(
+        _measure_tie_count(
+            note.onset_beats,
+            note.duration_beats,
+            score.time_signature.measure_beats,
+            score.pickup_beats,
+        )
+        for note in score.notes
+    )
+    sequence_score = (ordered[-1].rhythm_cumulative_score or 0.0) / len(ordered) if ordered else 0.0
+    return {
+        "mode": score.rhythm_optimizer,
+        "elapsed_seconds": score.rhythm_optimizer_seconds,
+        "evaluated_transitions": score.rhythm_evaluated_transitions,
+        "group_count": len(ordered),
+        "rhythmic_family_switches": family_switches,
+        "straight_triplet_switches": ternary_switches,
+        "isolated_triplet_events": isolated_triplets,
+        "isolated_thirty_second_values": _isolated_duration_groups(score, Fraction(1, 8)),
+        "isolated_dotted_sixteenth_values": _isolated_duration_groups(score, Fraction(3, 8)),
+        "tie_count": tie_count,
+        "notation_complexity_score": _written_notation_complexity(score),
+        "sequence_score_per_group": sequence_score,
+        "events_changed_from_local": sum(item.optimizer_changed_local_choice for item in ordered),
+        "timing_error_ms": {
+            "minimum": group_errors[0] if group_errors else 0.0,
+            "median": group_errors[len(group_errors) // 2] if group_errors else 0.0,
+            "p95": (
+                group_errors[min(len(group_errors) - 1, int(len(group_errors) * 0.95))]
+                if group_errors
+                else 0.0
+            ),
+            "maximum": group_errors[-1] if group_errors else 0.0,
+        },
+    }
+
+
+def _written_notation_complexity(score: ReconstructedScore) -> float:
+    costs = {
+        "whole": 0.0,
+        "dotted-half": 0.03,
+        "half": 0.0,
+        "dotted-quarter": 0.05,
+        "quarter": 0.0,
+        "half-triplet": 0.25,
+        "dotted-eighth": 0.08,
+        "eighth": 0.1,
+        "quarter-triplet": 0.3,
+        "dotted-sixteenth": 0.7,
+        "sixteenth": 0.35,
+        "eighth-triplet": 0.45,
+        "dotted-thirty-second": 1.0,
+        "thirty-second": 0.85,
+        "sixteenth-triplet": 0.7,
+    }
+    values = [costs.get(duration_name(note.duration_beats), 1.0) for note in score.notes]
+    return statistics.mean(values) if values else 0.0
+
+
+def _measure_tie_count(
+    onset: Fraction,
+    duration: Fraction,
+    measure_length: Fraction,
+    pickup_beats: Fraction,
+) -> int:
+    boundary = pickup_beats if pickup_beats > 0 else measure_length
+    offset = onset + duration
+    count = 0
+    while boundary < offset:
+        count += onset < boundary
+        boundary += measure_length
+    return count
+
+
+def _isolated_duration_groups(score: ReconstructedScore, duration: Fraction) -> int:
+    present = [
+        any(note.duration_beats == duration for note in chord.notes) for chord in score.chords
+    ]
+    return sum(
+        value
+        and (index == 0 or not present[index - 1])
+        and (index + 1 == len(present) or not present[index + 1])
+        for index, value in enumerate(present)
+    )
 
 
 def write_diagnostics_json(score: ReconstructedScore, path: str | Path) -> Path:
@@ -200,7 +343,57 @@ def write_diagnostics_tsv(score: ReconstructedScore, path: str | Path) -> Path:
             row = dict(event)
             row["suspicious_reasons"] = ",".join(cast(list[str], row["suspicious_reasons"]))
             row["quantization_candidates"] = json.dumps(row["quantization_candidates"])
+            row["duration_candidates"] = json.dumps(row["duration_candidates"])
             writer.writerow(row)
+    return output
+
+
+def write_rhythm_path_tsv(score: ReconstructedScore, path: str | Path) -> Path:
+    if score.rhythm_optimizer != "sequence":
+        raise ValueError("rhythm path diagnostics require sequence optimization")
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    grouped: dict[int, list[Any]] = {}
+    for diagnostic in score.diagnostics:
+        if diagnostic.action == "quantized" and diagnostic.rhythm_group_index is not None:
+            grouped.setdefault(diagnostic.rhythm_group_index, []).append(diagnostic)
+    rows: list[dict[str, object]] = []
+    for group_index in sorted(grouped):
+        diagnostics = grouped[group_index]
+        first = diagnostics[0]
+        rows.append(
+            {
+                "group_index": group_index,
+                "source_indices": ",".join(str(item.source_index) for item in diagnostics),
+                "raw_onset_seconds": min(item.raw_onset_seconds for item in diagnostics),
+                "selected_position_beats": fraction_text(first.quantized_onset_beats),
+                "selected_subdivision": first.selected_subdivision,
+                "selected_family": first.selected_rhythm_family,
+                "metric_position_beats": fraction_text(first.rhythm_metric_position_beats),
+                "requires_tie": first.rhythm_requires_tie,
+                "timing_error_ms": (
+                    first.rhythm_group_timing_error_seconds * 1000.0
+                    if first.rhythm_group_timing_error_seconds is not None
+                    else None
+                ),
+                "local_complexity_cost": first.rhythm_complexity_cost,
+                "local_path_cost": first.rhythm_local_cost,
+                "transition_cost": first.rhythm_transition_cost,
+                "cumulative_score": first.rhythm_cumulative_score,
+                "local_best_position_beats": fraction_text(first.local_best_position_beats),
+                "local_best_subdivision": first.local_best_subdivision,
+                "changed_from_local": first.optimizer_changed_local_choice,
+                "selection_reason": first.optimizer_selection_reason,
+                "selected_durations": ",".join(
+                    fraction_text(item.written_duration_beats) or "" for item in diagnostics
+                ),
+            }
+        )
+    fieldnames = list(rows[0]) if rows else ["group_index"]
+    with output.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        writer.writerows(rows)
     return output
 
 

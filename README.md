@@ -188,6 +188,48 @@ complexity `0.55`, ties `0.12`, pickup `0.12`, and tempo-level distance `0.08`. 
 `--meter-rhythm-complexity-weight`, `--meter-tie-weight`, `--meter-pickup-weight`, and
 `--meter-tempo-level-weight`. These generic defaults are not fitted to a particular composition.
 
+### Phrase-level rhythm optimization
+
+Local event-by-event quantization remains the default for reproducible comparison. Select the
+bounded phrase-level optimizer with `--rhythm-optimizer sequence`:
+
+```bash
+piano-scribe analyze-score transcription.json \
+  --infer-meter \
+  --rhythm-optimizer sequence \
+  --midi score.mid \
+  --musicxml score.musicxml \
+  --meter-hypotheses-tsv meter-hypotheses.tsv \
+  --rhythm-path-tsv rhythm-path.tsv \
+  --quantization-tsv quantization.tsv \
+  --diagnostics-json diagnostics.json
+```
+
+The existing quantizer still generates quarter, straight and triplet eighth, straight and triplet
+sixteenth, and thirty-second candidates. Notes attacked within 45 ms form one onset group and must
+share an onset. Candidates more than 55 ms beyond the best timing fit are pruned, at most five onset
+candidates and four duration candidates per group are retained, and a deterministic beam of 64
+paths carries state across measure boundaries. Duration pruning keeps alternatives within 200 ms of
+the best acoustic-offset fit. These limits are configurable with `--rhythm-candidate-limit`,
+`--rhythm-candidate-window-ms`, `--rhythm-duration-candidate-limit`,
+`--rhythm-duration-window-ms`, and `--rhythm-beam-size`.
+
+The sequence cost combines onset timing (`1.0`), duration timing (`0.6`), notation complexity
+(`0.65`), family switches (`0.35`), straight/triplet switches (`0.9`), isolated triplets (`0.65`),
+dotted micro-values (`0.65`), thirty-seconds (`0.65`), unusual short values (`0.4`), ties (`0.25`),
+tiny tie fragments (`0.8`), metric accents (`0.12`), pickup plausibility (`0.1`), repeated spacing
+patterns (`0.45`), and duration-pattern consistency (`0.2`). Every value has a corresponding
+`--rhythm-*-weight` CLI option and is also available through `RhythmSequenceWeights`. Fine values
+and triplets remain reachable when sustained timing evidence supports them; the penalties are
+priors rather than prohibitions.
+
+`rhythm-path.tsv` reports the selected family, timing and complexity costs, transition and
+cumulative costs, the rejected local best candidate, and the reason for each changed decision.
+JSON diagnostics add family-switch, isolated-value, tie, complexity, timing, changed-event, search
+size, and optimizer-runtime aggregates. During `--infer-meter`, meter selection intentionally uses
+the local quantizer first; sequence optimization is then applied to the selected hypothesis so a
+local-versus-sequence comparison does not silently change the meter experiment.
+
 Very short acoustic events are retained by default and receive a suspicious-event diagnostic.
 Use `--min-note-duration-ms 30` to opt into filtering; every filtered or merged event remains in the
 JSON/TSV diagnostics. The current pedal heuristic prevents a pedal-overlapped acoustic offset from

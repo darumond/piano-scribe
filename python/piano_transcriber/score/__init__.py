@@ -11,6 +11,11 @@ from piano_transcriber.score.reconstruct import (
     ReconstructionConfig,
     reconstruct_score,
 )
+from piano_transcriber.score.rhythm import (
+    RhythmOptimizerMode,
+    RhythmSequenceConfig,
+    RhythmSequenceWeights,
+)
 from piano_transcriber.score.tracking import BeatTrack, BeatTracker, SymbolicOnsetBeatTracker
 from piano_transcriber.score.types import ReconstructedScore, ScoreChord, ScoreNote, TimeSignature
 
@@ -23,6 +28,9 @@ __all__ = [
     "QuantizationGrid",
     "ReconstructedScore",
     "ReconstructionConfig",
+    "RhythmOptimizerMode",
+    "RhythmSequenceConfig",
+    "RhythmSequenceWeights",
     "ScoreChord",
     "ScoreNote",
     "SymbolicOnsetBeatTracker",

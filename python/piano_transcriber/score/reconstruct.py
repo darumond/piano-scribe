@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
@@ -14,6 +15,13 @@ from piano_transcriber.score.quantize import (
     snap_to_grid,
     snap_written_duration,
 )
+from piano_transcriber.score.rhythm import (
+    NoteDurationChoice,
+    RhythmOptimizerMode,
+    RhythmSelection,
+    RhythmSequenceConfig,
+    optimize_rhythm_sequence,
+)
 from piano_transcriber.score.tempo import beats_to_seconds, seconds_to_beats
 from piano_transcriber.score.tracking import BeatTrack
 from piano_transcriber.score.types import (
@@ -25,6 +33,8 @@ from piano_transcriber.score.types import (
     TimeSignature,
 )
 from piano_transcriber.transcription.types import NoteEvent, PedalEvent, TranscriptionResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +51,8 @@ class ReconstructionConfig:
     infer_pickup: bool = False
     pickup_beats: Fraction | None = None
     downbeat_position_beats: float | None = None
+    rhythm_optimizer: RhythmOptimizerMode = RhythmOptimizerMode.LOCAL
+    rhythm_sequence: RhythmSequenceConfig = field(default_factory=RhythmSequenceConfig)
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.bpm) or self.bpm <= 0.0:
@@ -69,6 +81,8 @@ class _Candidate:
     continuous_onset_beats: float
     selected_subdivision: str
     quantization_candidates: tuple[QuantizationCandidate, ...]
+    duration_choice: NoteDurationChoice | None = None
+    rhythm_selection: RhythmSelection | None = None
 
 
 def reconstruct_score(
@@ -95,7 +109,33 @@ def reconstruct_score(
             beat_track,
             config,
         )
+    rhythm_result = None
+    rhythm_by_source: dict[int, RhythmSelection] = {}
+    if config.rhythm_optimizer is RhythmOptimizerMode.SEQUENCE:
+        if beat_track is None or not config.adaptive_quantization:
+            raise ValueError(
+                "sequence rhythm optimization requires adaptive beat-aware quantization"
+            )
+        rhythm_result = optimize_rhythm_sequence(
+            result,
+            beat_track,
+            beat_offset=beat_offset,
+            time_signature=config.time_signature,
+            pickup_beats=pickup_beats,
+            quantization_complexity_cost=config.rhythmic_complexity_cost,
+            timing_tolerance_ms=config.maximum_quantization_error_ms,
+            config=config.rhythm_sequence,
+        )
+        rhythm_by_source = rhythm_result.by_source_index()
+        logger.info(
+            "Rhythm sequence optimization evaluated %d transitions across %d groups in %.3f s",
+            rhythm_result.evaluated_transitions,
+            len(rhythm_result.selections),
+            rhythm_result.elapsed_seconds,
+        )
     for source_index, note in enumerate(result.notes):
+        duration_choice: NoteDurationChoice | None = None
+        rhythm_selection = rhythm_by_source.get(source_index)
         if beat_track is None:
             continuous_fraction = seconds_to_beats(note.onset_seconds, config.bpm)
             continuous_onset = float(continuous_fraction)
@@ -108,7 +148,41 @@ def reconstruct_score(
                 0.0,
                 beat_track.seconds_to_beats(note.onset_seconds) + beat_offset,
             )
-            if config.adaptive_quantization:
+            if rhythm_selection is not None:
+                selected_rhythm = rhythm_selection.candidate
+                quantized_onset = selected_rhythm.quantization.position_beats
+                error_seconds = (
+                    beat_track.beats_to_seconds(float(quantized_onset) - beat_offset)
+                    - note.onset_seconds
+                )
+                selected_subdivision = selected_rhythm.quantization.subdivision
+                quantization_candidates = tuple(
+                    QuantizationCandidate(
+                        candidate.quantization.subdivision,
+                        candidate.quantization.position_beats,
+                        beat_track.beats_to_seconds(
+                            float(candidate.quantization.position_beats) - beat_offset
+                        )
+                        - note.onset_seconds,
+                        candidate.quantization.complexity_penalty,
+                        abs(
+                            beat_track.beats_to_seconds(
+                                float(candidate.quantization.position_beats) - beat_offset
+                            )
+                            - note.onset_seconds
+                        )
+                        * 1000
+                        / config.maximum_quantization_error_ms
+                        + candidate.quantization.complexity_penalty,
+                    )
+                    for candidate in rhythm_selection.candidates
+                )
+                duration_choice = next(
+                    choice
+                    for choice in selected_rhythm.duration_choices
+                    if choice.source_index == source_index
+                )
+            elif config.adaptive_quantization:
                 selected, quantization_candidates = choose_quantization(
                     continuous_onset,
                     note.onset_seconds,
@@ -151,6 +225,62 @@ def reconstruct_score(
                 continuous_onset_beats=continuous_onset,
                 selected_subdivision=selected_subdivision,
                 quantization_candidates=quantization_candidates,
+                duration_candidates=(
+                    duration_choice.candidates if duration_choice is not None else ()
+                ),
+                rhythm_group_index=(
+                    rhythm_selection.group_index if rhythm_selection is not None else None
+                ),
+                selected_rhythm_family=(
+                    rhythm_selection.candidate.family.value
+                    if rhythm_selection is not None
+                    else None
+                ),
+                rhythm_metric_position_beats=(
+                    rhythm_selection.candidate.metric_position
+                    if rhythm_selection is not None
+                    else None
+                ),
+                rhythm_requires_tie=(
+                    rhythm_selection.candidate.requires_tie
+                    if rhythm_selection is not None
+                    else False
+                ),
+                rhythm_group_timing_error_seconds=(
+                    rhythm_selection.candidate.quantization.timing_error_seconds
+                    if rhythm_selection is not None
+                    else None
+                ),
+                rhythm_complexity_cost=(
+                    rhythm_selection.candidate.complexity_cost
+                    if rhythm_selection is not None
+                    else None
+                ),
+                rhythm_local_cost=(
+                    rhythm_selection.candidate.local_cost if rhythm_selection is not None else None
+                ),
+                rhythm_transition_cost=(
+                    rhythm_selection.transition_cost if rhythm_selection is not None else None
+                ),
+                rhythm_cumulative_score=(
+                    rhythm_selection.cumulative_score if rhythm_selection is not None else None
+                ),
+                local_best_subdivision=(
+                    rhythm_selection.local_best.subdivision
+                    if rhythm_selection is not None
+                    else None
+                ),
+                local_best_position_beats=(
+                    rhythm_selection.local_best.position_beats
+                    if rhythm_selection is not None
+                    else None
+                ),
+                optimizer_selection_reason=(
+                    rhythm_selection.reason if rhythm_selection is not None else None
+                ),
+                optimizer_changed_local_choice=(
+                    rhythm_selection.differs_from_local if rhythm_selection is not None else False
+                ),
             )
             continue
         candidates.append(
@@ -163,6 +293,8 @@ def reconstruct_score(
                 continuous_onset,
                 selected_subdivision,
                 quantization_candidates,
+                duration_choice,
+                rhythm_selection,
             )
         )
 
@@ -199,6 +331,41 @@ def reconstruct_score(
                     continuous_onset_beats=duplicate.continuous_onset_beats,
                     selected_subdivision=duplicate.selected_subdivision,
                     quantization_candidates=duplicate.quantization_candidates,
+                    duration_candidates=(
+                        duplicate.duration_choice.candidates
+                        if duplicate.duration_choice is not None
+                        else ()
+                    ),
+                    rhythm_group_index=(
+                        duplicate.rhythm_selection.group_index
+                        if duplicate.rhythm_selection is not None
+                        else None
+                    ),
+                    selected_rhythm_family=(
+                        duplicate.rhythm_selection.candidate.family.value
+                        if duplicate.rhythm_selection is not None
+                        else None
+                    ),
+                    rhythm_metric_position_beats=(
+                        duplicate.rhythm_selection.candidate.metric_position
+                        if duplicate.rhythm_selection is not None
+                        else None
+                    ),
+                    rhythm_requires_tie=(
+                        duplicate.rhythm_selection.candidate.requires_tie
+                        if duplicate.rhythm_selection is not None
+                        else False
+                    ),
+                    rhythm_group_timing_error_seconds=(
+                        duplicate.rhythm_selection.candidate.quantization.timing_error_seconds
+                        if duplicate.rhythm_selection is not None
+                        else None
+                    ),
+                    rhythm_complexity_cost=(
+                        duplicate.rhythm_selection.candidate.complexity_cost
+                        if duplicate.rhythm_selection is not None
+                        else None
+                    ),
                 )
     else:
         retained = candidates
@@ -238,11 +405,23 @@ def reconstruct_score(
         same_pitch_onset = next_same_pitch[candidate.source_index]
         if same_pitch_onset is not None and same_pitch_onset < target_offset:
             target_offset = same_pitch_onset
-        target_duration = target_offset - candidate.onset_beats
         maximum_duration = (
             same_pitch_onset - candidate.onset_beats if same_pitch_onset is not None else None
         )
-        written_duration = snap_written_duration(target_duration, maximum=maximum_duration)
+        if candidate.duration_choice is not None:
+            duration_options = candidate.duration_choice.candidates
+            if maximum_duration is not None:
+                bounded = tuple(
+                    item for item in duration_options if item.duration_beats <= maximum_duration
+                )
+                if bounded:
+                    duration_options = bounded
+            selected_duration = min(duration_options, key=lambda item: item.total_score)
+            written_duration = selected_duration.duration_beats
+            pedal_shortened = candidate.duration_choice.pedal_shortened
+        else:
+            target_duration = target_offset - candidate.onset_beats
+            written_duration = snap_written_duration(target_duration, maximum=maximum_duration)
         score_note = ScoreNote(
             source_index=candidate.source_index,
             pitch=note.pitch,
@@ -272,6 +451,76 @@ def reconstruct_score(
             continuous_onset_beats=candidate.continuous_onset_beats,
             selected_subdivision=candidate.selected_subdivision,
             quantization_candidates=candidate.quantization_candidates,
+            duration_candidates=(
+                candidate.duration_choice.candidates
+                if candidate.duration_choice is not None
+                else ()
+            ),
+            rhythm_group_index=(
+                candidate.rhythm_selection.group_index
+                if candidate.rhythm_selection is not None
+                else None
+            ),
+            selected_rhythm_family=(
+                candidate.rhythm_selection.candidate.family.value
+                if candidate.rhythm_selection is not None
+                else None
+            ),
+            rhythm_metric_position_beats=(
+                candidate.rhythm_selection.candidate.metric_position
+                if candidate.rhythm_selection is not None
+                else None
+            ),
+            rhythm_requires_tie=(
+                candidate.rhythm_selection.candidate.requires_tie
+                if candidate.rhythm_selection is not None
+                else False
+            ),
+            rhythm_group_timing_error_seconds=(
+                candidate.rhythm_selection.candidate.quantization.timing_error_seconds
+                if candidate.rhythm_selection is not None
+                else None
+            ),
+            rhythm_complexity_cost=(
+                candidate.rhythm_selection.candidate.complexity_cost
+                if candidate.rhythm_selection is not None
+                else None
+            ),
+            rhythm_local_cost=(
+                candidate.rhythm_selection.candidate.local_cost
+                if candidate.rhythm_selection is not None
+                else None
+            ),
+            rhythm_transition_cost=(
+                candidate.rhythm_selection.transition_cost
+                if candidate.rhythm_selection is not None
+                else None
+            ),
+            rhythm_cumulative_score=(
+                candidate.rhythm_selection.cumulative_score
+                if candidate.rhythm_selection is not None
+                else None
+            ),
+            local_best_subdivision=(
+                candidate.rhythm_selection.local_best.subdivision
+                if candidate.rhythm_selection is not None
+                else None
+            ),
+            local_best_position_beats=(
+                candidate.rhythm_selection.local_best.position_beats
+                if candidate.rhythm_selection is not None
+                else None
+            ),
+            optimizer_selection_reason=(
+                candidate.rhythm_selection.reason
+                if candidate.rhythm_selection is not None
+                else None
+            ),
+            optimizer_changed_local_choice=(
+                candidate.rhythm_selection.differs_from_local
+                if candidate.rhythm_selection is not None
+                else False
+            ),
         )
 
     score_notes_tuple = tuple(sorted(score_notes, key=lambda note: (note.onset_beats, note.pitch)))
@@ -320,6 +569,13 @@ def reconstruct_score(
         pickup_beats=pickup_beats,
         first_full_downbeat_beats=first_downbeat,
         beat_position_offset=beat_offset,
+        rhythm_optimizer=config.rhythm_optimizer.value,
+        rhythm_optimizer_seconds=(
+            rhythm_result.elapsed_seconds if rhythm_result is not None else 0.0
+        ),
+        rhythm_evaluated_transitions=(
+            rhythm_result.evaluated_transitions if rhythm_result is not None else 0
+        ),
     )
 
 

@@ -110,3 +110,25 @@ def test_analyze_parser_accepts_joint_meter_and_pickup_options() -> None:
     assert args.pickup_beats == "3/2"
     assert args.meter_hypotheses_tsv == Path("meter-hypotheses.tsv")
     assert args.meter_accent_weight == 1.25
+
+
+def test_analyze_parser_accepts_sequence_rhythm_options() -> None:
+    args = _parser().parse_args(
+        [
+            "analyze-score",
+            "transcription.json",
+            "--infer-meter",
+            "--rhythm-optimizer",
+            "sequence",
+            "--rhythm-path-tsv",
+            "rhythm-path.tsv",
+            "--rhythm-beam-size",
+            "32",
+            "--rhythm-triplet-switch-weight",
+            "1.2",
+        ]
+    )
+    assert args.rhythm_optimizer == "sequence"
+    assert args.rhythm_path_tsv == Path("rhythm-path.tsv")
+    assert args.rhythm_beam_size == 32
+    assert args.rhythm_triplet_switch_weight == 1.2
