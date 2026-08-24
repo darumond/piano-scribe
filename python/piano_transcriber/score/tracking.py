@@ -44,7 +44,7 @@ class BeatTrack:
     beats: tuple[BeatPoint, ...]
     tempo_segments: tuple[TempoSegment, ...]
     time_signature: TimeSignature
-    downbeat_phase: int
+    downbeat_phase: float
     downbeat_confidence: float
     onset_groups: tuple[OnsetGroup, ...] = ()
 
@@ -210,15 +210,16 @@ class SymbolicOnsetBeatTracker:
                 range(len(timestamps)),
                 key=lambda index: abs(timestamps[index] - manual_downbeat),
             )
-            phase = nearest % self.config.time_signature.numerator
+            phase = nearest % float(self.config.time_signature.measure_beats)
             downbeat_confidence = 1.0
+        measure_length = float(self.config.time_signature.measure_beats)
         beats = tuple(
             BeatPoint(
                 number=index,
                 timestamp_seconds=timestamp,
                 bpm=bpms[index],
                 confidence=confidences[index],
-                downbeat=(index - phase) % self.config.time_signature.numerator == 0,
+                downbeat=_cyclic_distance(index, phase, measure_length) < 1e-6,
             )
             for index, timestamp in enumerate(timestamps)
         )
@@ -328,23 +329,28 @@ class SymbolicOnsetBeatTracker:
         self,
         groups: tuple[OnsetGroup, ...],
         timestamps: list[float],
-    ) -> tuple[int, float]:
-        beats_per_measure = self.config.time_signature.numerator
-        scores = [0.0] * beats_per_measure
-        for phase in range(beats_per_measure):
-            for index in range(phase, len(timestamps), beats_per_measure):
+    ) -> tuple[float, float]:
+        measure_length = float(self.config.time_signature.measure_beats)
+        phase_count = max(2, round(measure_length * 2))
+        phases = [index / 2 for index in range(phase_count)]
+        scores = [0.0] * len(phases)
+        for phase_index, phase in enumerate(phases):
+            for index, timestamp in enumerate(timestamps):
+                if _cyclic_distance(index, phase, measure_length) > 1e-6:
+                    continue
                 nearby = [
-                    group
-                    for group in groups
-                    if abs(group.timestamp_seconds - timestamps[index]) <= 0.15
+                    group for group in groups if abs(group.timestamp_seconds - timestamp) <= 0.15
                 ]
                 if nearby:
                     strongest = max(nearby, key=lambda group: group.strength)
-                    scores[phase] += strongest.strength + max(0, 55 - strongest.bass_pitch) / 30
-        ranking = sorted(range(beats_per_measure), key=scores.__getitem__, reverse=True)
+                    scores[phase_index] += (
+                        strongest.strength + max(0, 55 - strongest.bass_pitch) / 30
+                    )
+        ranking = sorted(range(len(phases)), key=scores.__getitem__, reverse=True)
         best, second = scores[ranking[0]], scores[ranking[1]]
         confidence = max(0.0, min(1.0, (best - second) / best)) if best else 0.0
-        return ranking[0], confidence
+        selected = phases[ranking[0]]
+        return int(selected) if selected.is_integer() else selected, confidence
 
 
 def fixed_beat_track(
@@ -365,15 +371,21 @@ def fixed_beat_track(
         start -= period
     count = max(2, math.floor((duration_seconds - start) / period) + 1)
     timestamps = [start + index * period for index in range(count)]
-    phase = 0
+    phase = 0.0
     confidence = 1.0
     if first_downbeat_seconds is not None:
-        phase = (
-            min(range(count), key=lambda index: abs(timestamps[index] - first_downbeat_seconds))
-            % signature.numerator
-        )
+        phase = min(
+            range(count), key=lambda index: abs(timestamps[index] - first_downbeat_seconds)
+        ) % float(signature.measure_beats)
+    measure_length = float(signature.measure_beats)
     beats = tuple(
-        BeatPoint(index, timestamp, bpm, 1.0, (index - phase) % signature.numerator == 0)
+        BeatPoint(
+            index,
+            timestamp,
+            bpm,
+            1.0,
+            _cyclic_distance(index, phase, measure_length) < 1e-6,
+        )
         for index, timestamp in enumerate(timestamps)
     )
     segments = tuple(
@@ -381,3 +393,8 @@ def fixed_beat_track(
         for index, (earlier, later) in enumerate(pairwise(timestamps))
     )
     return BeatTrack(beats, segments, signature, phase, confidence)
+
+
+def _cyclic_distance(position: float, phase: float, period: float) -> float:
+    remainder = (position - phase) % period
+    return min(remainder, period - remainder)

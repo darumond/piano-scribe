@@ -6,11 +6,13 @@ import csv
 import json
 from collections import Counter
 from collections.abc import Mapping
+from dataclasses import asdict
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, cast
 
-from piano_transcriber.score.beats import measure_position
+from piano_transcriber.score.beats import locate_score_measure
+from piano_transcriber.score.meter import JointMeterResult, MeterHypothesis
 from piano_transcriber.score.types import ReconstructedScore
 from piano_transcriber.transcription.types import NoteEvent, PedalEvent, TranscriptionResult
 
@@ -91,7 +93,11 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
     }
     events: list[dict[str, object]] = []
     for diagnostic in score.diagnostics:
-        measure, beat = measure_position(diagnostic.quantized_onset_beats, score.time_signature)
+        measure_index, beat, _measure_length = locate_score_measure(
+            diagnostic.quantized_onset_beats,
+            score.time_signature,
+            score.pickup_beats,
+        )
         note = score_notes.get(diagnostic.source_index)
         events.append(
             {
@@ -122,7 +128,7 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
                     if diagnostic.written_duration_beats is not None
                     else None
                 ),
-                "measure": measure,
+                "measure": measure_index if score.pickup_beats > 0 else measure_index + 1,
                 "beat_in_measure": fraction_text(beat),
                 "chord_size": chord_size.get(diagnostic.source_index),
                 "action": diagnostic.action,
@@ -156,6 +162,8 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
         "chord_group_count": len(score.chords),
         "multi_note_chord_count": sum(len(chord.notes) > 1 for chord in score.chords),
         "measure_count": score.measure_count,
+        "pickup_beats": fraction_text(score.pickup_beats),
+        "first_full_downbeat_beats": fraction_text(score.first_full_downbeat_beats),
         "rhythmic_values": dict(sorted(rhythms.items())),
         "actions": dict(sorted(action_counts.items())),
         "pedal_event_count": len(score.pedal_intervals),
@@ -229,4 +237,58 @@ def write_tempo_tsv(score: ReconstructedScore, path: str | Path) -> Path:
                     segment.bpm,
                 )
             )
+    return output
+
+
+def meter_hypothesis_data(hypothesis: MeterHypothesis) -> dict[str, object]:
+    return {
+        "time_signature": str(hypothesis.time_signature),
+        "pulse_factor": hypothesis.pulse_factor,
+        "pulse_bpm": hypothesis.pulse_bpm,
+        "notated_beat_bpm": hypothesis.notated_beat_bpm,
+        "higher_level_bpm": hypothesis.higher_level_bpm,
+        "downbeat_phase_beats": fraction_text(hypothesis.downbeat_phase_beats),
+        "pickup_beats": fraction_text(hypothesis.pickup_beats),
+        "measure_count": hypothesis.measure_count,
+        "timing_error_ms": hypothesis.timing_error_ms,
+        "rhythmic_complexity_score": hypothesis.rhythmic_complexity_score,
+        "tie_count": hypothesis.tie_count,
+        "triplet_ratio": hypothesis.triplet_ratio,
+        "metric_accent_score": hypothesis.metric_accent_score,
+        "tempo_smoothness_score": hypothesis.tempo_smoothness_score,
+        "total_score": hypothesis.total_score,
+        "normalized_score": hypothesis.normalized_score,
+    }
+
+
+def write_meter_hypotheses_tsv(result: JointMeterResult, path: str | Path) -> Path:
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for rank, hypothesis in enumerate(result.hypotheses, start=1):
+        row = {
+            "rank": rank,
+            **meter_hypothesis_data(hypothesis),
+            "relative_score": hypothesis.total_score - result.best.total_score,
+            "confidence_margin": result.confidence_margin if rank == 1 else "",
+        }
+        rows.append(row)
+    with output.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]), delimiter="\t")
+        writer.writeheader()
+        writer.writerows(rows)
+    return output
+
+
+def write_joint_diagnostics_json(result: JointMeterResult, path: str | Path) -> Path:
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    data = score_diagnostics(result.score)
+    data["meter_inference"] = {
+        "confidence_margin": result.confidence_margin,
+        "weights": asdict(result.config.weights),
+        "best": meter_hypothesis_data(result.best),
+        "hypotheses": [meter_hypothesis_data(hypothesis) for hypothesis in result.hypotheses],
+    }
+    output.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return output

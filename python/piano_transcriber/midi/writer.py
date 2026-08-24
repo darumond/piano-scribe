@@ -91,9 +91,8 @@ def write_score_midi(
             )
         )
     if score.beat_track is not None:
-        padding = score.beat_track.measure_padding_beats
         for beat in score.beat_track.beats:
-            beat_ticks = round((beat.number + padding) * ticks_per_beat)
+            beat_ticks = round((beat.number + score.beat_position_offset) * ticks_per_beat)
             if beat_ticks >= 0:
                 events.append(
                     (
@@ -108,8 +107,7 @@ def write_score_midi(
     track = mido.MidiTrack()
     midi.tracks.append(track)
     track.append(mido.MetaMessage("track_name", name="PianoScribe reconstructed score", time=0))
-    if score.beat_track is None:
-        track.append(mido.MetaMessage("set_tempo", tempo=tempo, time=0))
+    track.append(mido.MetaMessage("set_tempo", tempo=tempo, time=0))
     previous_ticks = 0
     for absolute_ticks, _priority, message in events:
         message.time = max(0, absolute_ticks - previous_ticks)

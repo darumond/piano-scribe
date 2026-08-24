@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 
-from piano_transcriber.score.beats import required_measures
+from piano_transcriber.score.beats import required_score_measures
 from piano_transcriber.score.chords import group_chords
 from piano_transcriber.score.quantize import (
     QuantizationGrid,
@@ -38,6 +38,9 @@ class ReconstructionConfig:
     suspicious_note_duration_ms: float = 30.0
     merge_same_pitch_at_quantized_onset: bool = True
     time_signature: TimeSignature = field(default_factory=TimeSignature)
+    infer_pickup: bool = False
+    pickup_beats: Fraction | None = None
+    downbeat_position_beats: float | None = None
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.bpm) or self.bpm <= 0.0:
@@ -50,6 +53,10 @@ class ReconstructionConfig:
             raise ValueError("minimum note duration must be non-negative")
         if self.suspicious_note_duration_ms < 0.0:
             raise ValueError("suspicious note duration must be non-negative")
+        if self.pickup_beats is not None and (
+            self.pickup_beats < 0 or self.pickup_beats >= self.time_signature.measure_beats
+        ):
+            raise ValueError("pickup must be non-negative and shorter than a measure")
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +86,15 @@ def reconstruct_score(
         if config.adaptive_quantization
         else config.grid.step_beats
     )
-    beat_offset = beat_track.measure_padding_beats if beat_track is not None else 0.0
+    beat_offset = 0.0
+    pickup_beats = config.pickup_beats or Fraction(0)
+    first_downbeat = Fraction(0)
+    if beat_track is not None:
+        beat_offset, pickup_beats, first_downbeat = _score_alignment(
+            result,
+            beat_track,
+            config,
+        )
     for source_index, note in enumerate(result.notes):
         if beat_track is None:
             continuous_fraction = seconds_to_beats(note.onset_seconds, config.bpm)
@@ -89,7 +104,10 @@ def reconstruct_score(
             selected_subdivision = config.grid.value
             quantization_candidates: tuple[QuantizationCandidate, ...] = ()
         else:
-            continuous_onset = beat_track.seconds_to_beats(note.onset_seconds) + beat_offset
+            continuous_onset = max(
+                0.0,
+                beat_track.seconds_to_beats(note.onset_seconds) + beat_offset,
+            )
             if config.adaptive_quantization:
                 selected, quantization_candidates = choose_quantization(
                     continuous_onset,
@@ -260,27 +278,29 @@ def reconstruct_score(
     chords = group_chords(score_notes_tuple)
     end_position = max((note.offset_beats for note in score_notes_tuple), default=Fraction(0))
     raw_pedals = result.pedal_events if pedal_intervals is None else pedal_intervals
-    score_pedals = tuple(
-        PedalInterval(
-            interval.onset_seconds,
-            interval.offset_seconds,
-            (
-                seconds_to_beats(interval.onset_seconds, config.bpm)
-                if beat_track is None
-                else Fraction(
-                    str(beat_track.seconds_to_beats(interval.onset_seconds) + beat_offset)
-                )
-            ),
-            (
-                seconds_to_beats(interval.offset_seconds, config.bpm)
-                if beat_track is None
-                else Fraction(
-                    str(beat_track.seconds_to_beats(interval.offset_seconds) + beat_offset)
-                )
-            ),
+    score_pedals_list: list[PedalInterval] = []
+    for interval in raw_pedals:
+        pedal_onset = (
+            seconds_to_beats(interval.onset_seconds, config.bpm)
+            if beat_track is None
+            else Fraction(str(beat_track.seconds_to_beats(interval.onset_seconds) + beat_offset))
         )
-        for interval in raw_pedals
-    )
+        pedal_offset = (
+            seconds_to_beats(interval.offset_seconds, config.bpm)
+            if beat_track is None
+            else Fraction(str(beat_track.seconds_to_beats(interval.offset_seconds) + beat_offset))
+        )
+        pedal_onset = max(Fraction(0), pedal_onset)
+        if pedal_offset > pedal_onset:
+            score_pedals_list.append(
+                PedalInterval(
+                    interval.onset_seconds,
+                    interval.offset_seconds,
+                    pedal_onset,
+                    pedal_offset,
+                )
+            )
+    score_pedals = tuple(score_pedals_list)
     ordered_diagnostics = tuple(diagnostics[index] for index in sorted(diagnostics))
     return ReconstructedScore(
         bpm=config.bpm,
@@ -291,9 +311,51 @@ def reconstruct_score(
         chords=chords,
         diagnostics=ordered_diagnostics,
         pedal_intervals=score_pedals,
-        measure_count=required_measures(end_position, config.time_signature),
+        measure_count=required_score_measures(
+            end_position,
+            config.time_signature,
+            pickup_beats,
+        ),
         beat_track=beat_track,
+        pickup_beats=pickup_beats,
+        first_full_downbeat_beats=first_downbeat,
+        beat_position_offset=beat_offset,
     )
+
+
+def _score_alignment(
+    result: TranscriptionResult,
+    beat_track: BeatTrack,
+    config: ReconstructionConfig,
+) -> tuple[float, Fraction, Fraction]:
+    if not config.infer_pickup and config.pickup_beats is None:
+        padding = beat_track.measure_padding_beats
+        return padding, Fraction(0), Fraction(0)
+    first_event = min(
+        (beat_track.seconds_to_beats(note.onset_seconds) for note in result.notes),
+        default=0.0,
+    )
+    measure_length = float(config.time_signature.measure_beats)
+    phase = (
+        config.downbeat_position_beats
+        if config.downbeat_position_beats is not None
+        else float(beat_track.downbeat_phase)
+    )
+    cycles = math.ceil((first_event - phase) / measure_length)
+    next_downbeat = phase + cycles * measure_length
+    if next_downbeat < first_event - 1e-6:
+        next_downbeat += measure_length
+    if config.pickup_beats is not None:
+        pickup = config.pickup_beats
+    elif abs(next_downbeat - first_event) <= 1e-6:
+        pickup = Fraction(0)
+    else:
+        raw_pickup = max(0.0, min(measure_length - 0.125, next_downbeat - first_event))
+        pickup = snap_to_grid(Fraction(str(raw_pickup)), Fraction(1, 8))
+        if pickup >= config.time_signature.measure_beats:
+            pickup = Fraction(0)
+    origin = next_downbeat - float(pickup)
+    return -origin, pickup, pickup
 
 
 def with_uniform_chord_durations(score: ReconstructedScore) -> ReconstructedScore:

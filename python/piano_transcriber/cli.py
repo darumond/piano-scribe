@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 from collections.abc import Sequence
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +22,15 @@ from piano_transcriber.score.diagnostics import (
     write_beats_tsv,
     write_diagnostics_json,
     write_diagnostics_tsv,
+    write_joint_diagnostics_json,
+    write_meter_hypotheses_tsv,
     write_tempo_tsv,
+)
+from piano_transcriber.score.meter import (
+    JointMeterConfig,
+    JointMeterResult,
+    JointMeterWeights,
+    infer_joint_meter_score,
 )
 from piano_transcriber.score.quantize import QuantizationGrid
 from piano_transcriber.score.reconstruct import ReconstructionConfig, reconstruct_score
@@ -56,6 +65,11 @@ def _add_score_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="infer beats, downbeats, and a local tempo curve from note onsets",
     )
+    tempo.add_argument(
+        "--infer-meter",
+        action="store_true",
+        help="jointly infer pulse level, meter, downbeat, and pickup",
+    )
     parser.add_argument(
         "--time-signature",
         default="4/4",
@@ -66,6 +80,11 @@ def _add_score_options(parser: argparse.ArgumentParser) -> None:
         "--first-downbeat",
         type=float,
         help="manual downbeat timestamp in seconds",
+    )
+    parser.add_argument(
+        "--pickup-beats",
+        type=str,
+        help="manual pickup duration in quarter-note beats, e.g. 1 or 3/2",
     )
     parser.add_argument("--minimum-bpm", type=float, default=30.0)
     parser.add_argument("--maximum-bpm", type=float, default=220.0)
@@ -101,6 +120,18 @@ def _add_score_options(parser: argparse.ArgumentParser) -> None:
         type=Path,
         help="note quantization decisions TSV path",
     )
+    parser.add_argument(
+        "--meter-hypotheses-tsv",
+        type=Path,
+        help="joint pulse/meter hypothesis report",
+    )
+    parser.add_argument("--meter-timing-weight", type=float, default=1.0)
+    parser.add_argument("--meter-tempo-smoothness-weight", type=float, default=0.2)
+    parser.add_argument("--meter-accent-weight", type=float, default=0.8)
+    parser.add_argument("--meter-rhythm-complexity-weight", type=float, default=0.55)
+    parser.add_argument("--meter-tie-weight", type=float, default=0.12)
+    parser.add_argument("--meter-pickup-weight", type=float, default=0.12)
+    parser.add_argument("--meter-tempo-level-weight", type=float, default=0.08)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -157,7 +188,7 @@ def _run_transcribe(args: argparse.Namespace) -> int:
         checkpoint_path=args.checkpoint,
         device=args.device,
     )
-    if args.bpm is None and not args.estimate_bpm and not args.track_beats:
+    if args.bpm is None and not args.estimate_bpm and not args.track_beats and not args.infer_meter:
         if any(
             path is not None
             for path in (
@@ -166,6 +197,7 @@ def _run_transcribe(args: argparse.Namespace) -> int:
                 args.beats_tsv,
                 args.tempo_tsv,
                 args.quantization_tsv,
+                args.meter_hypotheses_tsv,
             )
         ):
             raise ValueError("score diagnostics require --bpm")
@@ -176,8 +208,8 @@ def _run_transcribe(args: argparse.Namespace) -> int:
         return 0
 
     output = TranscriptionPipeline(config).run(args.input)
-    score = _reconstruct(args, output.result)
-    _write_score_outputs(score, args)
+    score, joint_result = _reconstruct(args, output.result)
+    _write_score_outputs(score, args, joint_result)
     print(f"Transcribed {len(output.result.notes)} notes with {output.result.model_name}")
     print(
         f"Reconstructed {len(score.notes)} written notes in {score.measure_count} measures "
@@ -203,7 +235,9 @@ def _score_config(
         tempo = MedianInterOnsetTempoEstimator()
         resolved_bpm = tempo.estimate_bpm(result)
     else:
-        raise ValueError("score reconstruction requires --bpm, --estimate-bpm, or --track-beats")
+        raise ValueError(
+            "score reconstruction requires --bpm, --estimate-bpm, --track-beats, or --infer-meter"
+        )
     return ReconstructionConfig(
         bpm=resolved_bpm,
         grid=QuantizationGrid(args.quantization),
@@ -212,18 +246,23 @@ def _score_config(
         rhythmic_complexity_cost=args.rhythmic_complexity_cost,
         minimum_note_duration_ms=args.min_note_duration_ms,
         time_signature=TimeSignature.parse(args.time_signature),
+        infer_pickup=args.track_beats or args.infer_meter,
+        pickup_beats=(Fraction(args.pickup_beats) if args.pickup_beats is not None else None),
     )
 
 
-def _reconstruct(args: argparse.Namespace, result: TranscriptionResult) -> ReconstructedScore:
+def _reconstruct(
+    args: argparse.Namespace,
+    result: TranscriptionResult,
+) -> tuple[ReconstructedScore, JointMeterResult | None]:
     signature = TimeSignature.parse(args.time_signature)
     beat_track: BeatTrack | None = None
-    if args.track_beats:
+    if args.track_beats or args.infer_meter:
         tracker = SymbolicOnsetBeatTracker(
             SymbolicBeatTrackerConfig(
                 minimum_bpm=args.minimum_bpm,
                 maximum_bpm=args.maximum_bpm,
-                time_signature=signature,
+                time_signature=signature if args.track_beats else TimeSignature(),
                 first_beat_seconds=args.first_beat,
                 first_downbeat_seconds=args.first_downbeat,
             )
@@ -235,10 +274,33 @@ def _reconstruct(args: argparse.Namespace, result: TranscriptionResult) -> Recon
             bpm=beat_track.median_bpm,
             adaptive=True,
         )
+        if args.infer_meter:
+            joint = infer_joint_meter_score(
+                result,
+                beat_track,
+                config,
+                JointMeterConfig(
+                    minimum_bpm=args.minimum_bpm,
+                    maximum_bpm=args.maximum_bpm,
+                    first_downbeat_seconds=args.first_downbeat,
+                    weights=JointMeterWeights(
+                        timing_fit=args.meter_timing_weight,
+                        tempo_smoothness=args.meter_tempo_smoothness_weight,
+                        metric_accent=args.meter_accent_weight,
+                        rhythmic_complexity=args.meter_rhythm_complexity_weight,
+                        tie_complexity=args.meter_tie_weight,
+                        pickup_penalty=args.meter_pickup_weight,
+                        tempo_level_distance=args.meter_tempo_level_weight,
+                    ),
+                ),
+            )
+            return joint.score, joint
     else:
         config = _score_config(args, result)
         if args.bpm is not None and (
-            args.first_beat is not None or args.first_downbeat is not None
+            args.first_beat is not None
+            or args.first_downbeat is not None
+            or args.pickup_beats is not None
         ):
             beat_track = fixed_beat_track(
                 result.audio_duration_seconds,
@@ -247,10 +309,14 @@ def _reconstruct(args: argparse.Namespace, result: TranscriptionResult) -> Recon
                 first_beat_seconds=args.first_beat or 0.0,
                 first_downbeat_seconds=args.first_downbeat,
             )
-    return reconstruct_score(result, config, beat_track=beat_track)
+    return reconstruct_score(result, config, beat_track=beat_track), None
 
 
-def _write_score_outputs(score: ReconstructedScore, args: argparse.Namespace) -> None:
+def _write_score_outputs(
+    score: ReconstructedScore,
+    args: argparse.Namespace,
+    joint_result: JointMeterResult | None = None,
+) -> None:
     if args.midi is not None:
         write_score_midi(score, args.midi)
         logger.info("Wrote reconstructed MIDI to %s", args.midi)
@@ -258,7 +324,10 @@ def _write_score_outputs(score: ReconstructedScore, args: argparse.Namespace) ->
         write_score_musicxml(score, args.musicxml)
         logger.info("Wrote reconstructed MusicXML to %s", args.musicxml)
     if args.diagnostics_json is not None:
-        write_diagnostics_json(score, args.diagnostics_json)
+        if joint_result is not None:
+            write_joint_diagnostics_json(joint_result, args.diagnostics_json)
+        else:
+            write_diagnostics_json(score, args.diagnostics_json)
         logger.info("Wrote score diagnostics JSON to %s", args.diagnostics_json)
     if args.diagnostics_tsv is not None:
         write_diagnostics_tsv(score, args.diagnostics_tsv)
@@ -272,12 +341,17 @@ def _write_score_outputs(score: ReconstructedScore, args: argparse.Namespace) ->
     if args.tempo_tsv is not None:
         write_tempo_tsv(score, args.tempo_tsv)
         logger.info("Wrote tempo TSV to %s", args.tempo_tsv)
+    if args.meter_hypotheses_tsv is not None:
+        if joint_result is None:
+            raise ValueError("meter hypothesis output requires --infer-meter")
+        write_meter_hypotheses_tsv(joint_result, args.meter_hypotheses_tsv)
+        logger.info("Wrote meter hypothesis TSV to %s", args.meter_hypotheses_tsv)
 
 
 def _run_analyze_score(args: argparse.Namespace) -> int:
     result = load_transcription_json(args.input)
-    score = _reconstruct(args, result)
-    _write_score_outputs(score, args)
+    score, joint_result = _reconstruct(args, result)
+    _write_score_outputs(score, args, joint_result)
     summary = score_diagnostics(score)
     print(f"BPM: {score.bpm:g}")
     print(f"Grid: {score.grid_name} ({score.grid_step_beats} quarter-note beats)")
@@ -295,6 +369,12 @@ def _run_analyze_score(args: argparse.Namespace) -> int:
             f"BPM, range {minimum_bpm:.2f}-{maximum_bpm:.2f}"
         )
         print(f"Downbeat confidence: {score.beat_track.downbeat_confidence:.3f}")
+    if joint_result is not None:
+        print(
+            f"Selected meter: {joint_result.best.time_signature}; "
+            f"hypothesis confidence margin: {joint_result.confidence_margin:.4f}"
+        )
+        print(f"Pickup: {joint_result.best.pickup_beats} quarter-note beats")
     return 0
 
 

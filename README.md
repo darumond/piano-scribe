@@ -27,7 +27,7 @@ The included backends are:
 Raw MusicXML output remains available when no tempo is supplied. When score reconstruction is
 enabled, acoustic events are converted to exact quarter-note units, quantized, grouped into chords,
 and written into measures with conventional note values. The first reconstruction layer does not
-yet perform robust beat tracking, voice allocation, staff separation, or sophisticated engraving.
+yet perform voice allocation, staff separation, or sophisticated engraving.
 
 ## Requirements and installation
 
@@ -144,15 +144,49 @@ piano-scribe analyze-score transcription.json \
 
 The local tracker clusters near-simultaneous chord attacks, weights velocity, bass motion, chord
 changes, and onset density, then follows a bounded pulse with robust local-period smoothing. It
-reports confidence for every beat and for the inferred 4/4 downbeat phase. Use `--first-beat` and
-`--first-downbeat` (timestamps in seconds) for manual alignment. The same overrides work with
-explicit `--bpm`, preserving a deterministic constant-tempo mode.
+reports confidence for every beat and for the inferred downbeat phase. Supported manual meters are
+2/4, 3/4, 4/4, 6/4, 6/8, 9/8, and 12/8. Use `--first-beat` and `--first-downbeat` (timestamps in
+seconds) for manual alignment. The same overrides work with explicit `--bpm`, preserving a
+deterministic constant-tempo mode. `--pickup-beats` accepts quarter-note units, including fractions
+such as `3/2`; pickup measures are emitted as implicit MusicXML measure 0 without front padding.
 
 Beat-aware quantization scores all supported subdivisions using timing error plus a configurable
 notation-complexity penalty. This makes straight eighths preferable to triplet or finer grids when
 their timing fits are close. Candidate timing errors, penalties, and the selected subdivision are
 included per note in JSON and TSV diagnostics. Local tempo changes are emitted as MIDI tempo events
 and MusicXML measure-level tempo directions.
+
+For automatic joint pulse, meter, downbeat, and pickup selection, use `--infer-meter`:
+
+```bash
+piano-scribe analyze-score transcription.json \
+  --infer-meter \
+  --minimum-bpm 30 \
+  --maximum-bpm 220 \
+  --midi score.mid \
+  --musicxml score.musicxml \
+  --beats-tsv beats.tsv \
+  --tempo-tsv tempo.tsv \
+  --meter-hypotheses-tsv meter-hypotheses.tsv \
+  --quantization-tsv quantization.tsv \
+  --diagnostics-json diagnostics.json
+```
+
+The global evaluator reconstructs every candidate path across the full excerpt. It tests pulse
+factors 0.5, 2/3, 1, 1.5, and 2 against all supported meters and half-beat downbeat phases. A single
+pulse level is held for the entire hypothesis, preventing frame-to-frame tempo-level switching.
+Each path combines median timing fit, local-tempo smoothness, metric-accent recurrence, rhythmic
+complexity, ties, pickup length, and distance from the tracker's initial pulse. Compound meters also
+score their dotted-quarter grouping and report notated eighth-note and higher-level BPM values. The
+report retains every
+hypothesis, normalized scores, relative scores, and the best-versus-runner-up confidence margin;
+a small margin should be treated as ambiguity, not a confident meter decision.
+
+The default objective weights are timing `1.0`, tempo smoothness `0.2`, metric accent `0.8`, rhythm
+complexity `0.55`, ties `0.12`, pickup `0.12`, and tempo-level distance `0.08`. Override them with
+`--meter-timing-weight`, `--meter-tempo-smoothness-weight`, `--meter-accent-weight`,
+`--meter-rhythm-complexity-weight`, `--meter-tie-weight`, `--meter-pickup-weight`, and
+`--meter-tempo-level-weight`. These generic defaults are not fitted to a particular composition.
 
 Very short acoustic events are retained by default and receive a suspicious-event diagnostic.
 Use `--min-note-duration-ms 30` to opt into filtering; every filtered or merged event remains in the

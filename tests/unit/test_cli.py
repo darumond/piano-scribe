@@ -90,3 +90,23 @@ def test_analyze_parser_accepts_local_tracking_and_diagnostics() -> None:
     assert args.maximum_bpm == 180.0
     assert args.rhythmic_complexity_cost == 0.5
     assert args.beats_tsv == Path("beats.tsv")
+
+
+def test_analyze_parser_accepts_joint_meter_and_pickup_options() -> None:
+    args = _parser().parse_args(
+        [
+            "analyze-score",
+            "transcription.json",
+            "--infer-meter",
+            "--pickup-beats",
+            "3/2",
+            "--meter-hypotheses-tsv",
+            "meter-hypotheses.tsv",
+            "--meter-accent-weight",
+            "1.25",
+        ]
+    )
+    assert args.infer_meter
+    assert args.pickup_beats == "3/2"
+    assert args.meter_hypotheses_tsv == Path("meter-hypotheses.tsv")
+    assert args.meter_accent_weight == 1.25

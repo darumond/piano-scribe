@@ -148,6 +148,9 @@ class ReconstructedScore:
     pedal_intervals: tuple[PedalInterval, ...]
     measure_count: int
     beat_track: BeatTrack | None = None
+    pickup_beats: Fraction = Fraction(0)
+    first_full_downbeat_beats: Fraction = Fraction(0)
+    beat_position_offset: float = 0.0
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.bpm) or self.bpm <= 0.0:
@@ -156,3 +159,7 @@ class ReconstructedScore:
             raise ValueError("grid step must be positive")
         if self.measure_count <= 0:
             raise ValueError("measure_count must be positive")
+        if self.pickup_beats < 0 or self.pickup_beats >= self.time_signature.measure_beats:
+            raise ValueError("pickup must be shorter than one complete measure")
+        if self.first_full_downbeat_beats < 0:
+            raise ValueError("first full downbeat must be non-negative")

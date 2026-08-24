@@ -8,6 +8,7 @@ from fractions import Fraction
 from math import lcm
 from pathlib import Path
 
+from piano_transcriber.score.beats import locate_score_measure
 from piano_transcriber.score.quantize import WRITTEN_DURATIONS
 from piano_transcriber.score.types import ReconstructedScore, ScoreNote
 from piano_transcriber.transcription.types import NoteEvent, TranscriptionResult
@@ -110,15 +111,17 @@ class _NoteSegment:
 
 
 def _segments(score: ReconstructedScore) -> tuple[_NoteSegment, ...]:
-    measure_length = score.time_signature.measure_beats
     segments: list[_NoteSegment] = []
     for note in score.notes:
         position = note.onset_beats
         remaining = note.duration_beats
         first = True
         while remaining > 0:
-            measure_index = int(position // measure_length)
-            onset = position - measure_index * measure_length
+            measure_index, onset, measure_length = locate_score_measure(
+                position,
+                score.time_signature,
+                score.pickup_beats,
+            )
             measure_remaining = min(remaining, measure_length - onset)
             while measure_remaining > 0:
                 conventional = max(
@@ -211,7 +214,6 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
         *(segment.onset_in_measure.denominator for segment in segments),
         *(segment.duration.denominator for segment in segments),
     )
-    measure_length_ticks = int(score.time_signature.measure_beats * divisions)
 
     root = ET.Element("score-partwise", version="4.0")
     work = ET.SubElement(root, "work")
@@ -225,7 +227,15 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
     for segment in segments:
         by_measure.setdefault(segment.measure_index, []).append(segment)
     for measure_index in range(score.measure_count):
-        measure = ET.SubElement(part, "measure", number=str(measure_index + 1))
+        is_pickup = score.pickup_beats > 0 and measure_index == 0
+        measure_number = (
+            "0"
+            if is_pickup
+            else str(measure_index if score.pickup_beats > 0 else measure_index + 1)
+        )
+        measure = ET.SubElement(part, "measure", number=measure_number)
+        if is_pickup:
+            measure.set("implicit", "yes")
         if measure_index == 0:
             attributes = ET.SubElement(measure, "attributes")
             ET.SubElement(attributes, "divisions").text = str(divisions)
@@ -246,8 +256,13 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
             ET.SubElement(metronome, "per-minute").text = f"{score.bpm:g}"
             ET.SubElement(direction, "sound", tempo=f"{score.bpm:g}")
         elif score.beat_track is not None:
-            score_beat = measure_index * float(score.time_signature.measure_beats)
-            track_beat = score_beat - score.beat_track.measure_padding_beats
+            if score.pickup_beats > 0:
+                score_beat = float(
+                    score.pickup_beats + (measure_index - 1) * score.time_signature.measure_beats
+                )
+            else:
+                score_beat = measure_index * float(score.time_signature.measure_beats)
+            track_beat = score_beat - score.beat_position_offset
             nearest = min(
                 score.beat_track.beats,
                 key=lambda beat: abs(beat.number - track_beat),
@@ -260,6 +275,10 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
             ET.SubElement(direction, "sound", tempo=f"{nearest.bpm:g}")
 
         measure_segments = by_measure.get(measure_index, [])
+        current_measure_beats = (
+            score.pickup_beats if is_pickup else score.time_signature.measure_beats
+        )
+        measure_length_ticks = int(current_measure_beats * divisions)
         grouped: dict[Fraction, list[_NoteSegment]] = {}
         for segment in measure_segments:
             grouped.setdefault(segment.onset_in_measure, []).append(segment)
