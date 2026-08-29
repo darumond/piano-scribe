@@ -182,6 +182,14 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
                 "next_continuity_cost": diagnostic.next_continuity_cost,
                 "voice_duration_adjusted": diagnostic.voice_duration_adjusted,
                 "original_duration_beats": fraction_text(diagnostic.original_duration_beats),
+                "duration_change_reason": diagnostic.duration_change_reason,
+                "voice_identity_switched": diagnostic.voice_identity_switched,
+                "repeated_pitch_voice_switched": diagnostic.repeated_pitch_voice_switched,
+                "voice_assignment_reason": diagnostic.voice_assignment_reason,
+                "extra_voice_reason": diagnostic.extra_voice_reason,
+                "track_previous_pitch": diagnostic.track_previous_pitch,
+                "track_direction": diagnostic.track_direction,
+                "voice_continuity_score": diagnostic.voice_continuity_score,
                 "tie_across_measure": note.tie_across_measure if note is not None else False,
             }
         )
@@ -225,6 +233,7 @@ def score_diagnostics(score: ReconstructedScore) -> dict[str, object]:
         "beat_tracking": beat_summary,
         "rhythm_optimization": rhythm_optimization_data(score),
         "piano_layout": piano_layout_data(score),
+        "engraving": engraving_data(score),
         "events": events,
     }
 
@@ -305,6 +314,19 @@ def piano_layout_data(score: ReconstructedScore) -> dict[str, object]:
         "voices_per_staff": voice_counts,
         "voice_count": sum(voice_counts.values()),
         "voice_switches": voice_switches,
+        "voice_identity_switches": sum(note.voice_identity_switched for note in score.notes),
+        "repeated_pitch_voice_switches": sum(
+            note.repeated_pitch_voice_switched for note in score.notes
+        ),
+        "extra_voice_reasons": dict(
+            sorted(
+                Counter(
+                    note.extra_voice_reason
+                    for note in score.notes
+                    if note.extra_voice_reason is not None
+                ).items()
+            )
+        ),
         "hand_crossings": hand_crossings,
         "staff_crossings": staff_crossings,
         "average_melodic_interval_semitones": melodic_intervals,
@@ -315,7 +337,146 @@ def piano_layout_data(score: ReconstructedScore) -> dict[str, object]:
         "hand_optimizer_seconds": score.hand_optimizer_seconds,
         "hand_evaluated_transitions": score.hand_evaluated_transitions,
         "voice_optimizer_seconds": score.voice_optimizer_seconds,
+        "voice_stability_seconds": score.voice_stability_seconds,
         "voice_evaluated_transitions": score.voice_evaluated_transitions,
+    }
+
+
+def engraving_data(score: ReconstructedScore) -> dict[str, object]:
+    """Summarize derived rest, beam, tuplet, span, and staff-placement evidence."""
+    original_rest_decisions = [item for item in score.rest_decisions if item.action != "merge"]
+    fragments_by_stream: Counter[str] = Counter()
+    for rest in score.rests:
+        measure, _local, _length = locate_score_measure(
+            rest.onset_beats,
+            score.time_signature,
+            score.pickup_beats,
+        )
+        fragments_by_stream[f"measure_{measure}_staff_{rest.staff}_voice_{rest.voice}"] += 1
+    ledger_by_staff = {
+        str(staff): {
+            "event_count": len(values),
+            "maximum_estimated_ledger_lines": max(
+                (item.estimated_ledger_lines for item in values), default=0
+            ),
+        }
+        for staff in (1, 2)
+        if (values := [item for item in score.ledger_line_diagnostics if item.staff == staff])
+    }
+    measure_complexity = []
+    for measure_index in range(score.measure_count):
+        notes = [
+            note
+            for note in score.notes
+            if locate_score_measure(
+                note.onset_beats,
+                score.time_signature,
+                score.pickup_beats,
+            )[0]
+            == measure_index
+        ]
+        rests = [
+            rest
+            for rest in score.rests
+            if locate_score_measure(
+                rest.onset_beats,
+                score.time_signature,
+                score.pickup_beats,
+            )[0]
+            == measure_index
+        ]
+        beam_count = sum(item.measure_index == measure_index for item in score.beam_annotations)
+        tuplet_count = sum(item.measure_index == measure_index for item in score.tuplet_annotations)
+        voices = len({(note.staff, note.voice) for note in notes})
+        measure_complexity.append(
+            {
+                "measure_index": measure_index,
+                "note_attacks": len(notes),
+                "logical_rests": len(rests),
+                "beam_annotations": beam_count,
+                "tuplet_marks": tuplet_count,
+                "active_voice_streams": voices,
+                "complexity_score": len(notes)
+                + len(rests)
+                + beam_count
+                + 2 * tuplet_count
+                + voices,
+            }
+        )
+    return {
+        "mode": score.engraving_mode,
+        "timings_seconds": {
+            "voice_stability": score.voice_stability_seconds,
+            "rest_optimization": score.rest_optimizer_seconds,
+            "annotation": score.engraving_annotation_seconds,
+            "total_engraving": score.engraving_total_seconds,
+        },
+        "rests": {
+            "logical_before": len(original_rest_decisions),
+            "logical_after": len(score.rests),
+            "total_duration_beats_before": fraction_text(
+                sum((item.duration_beats for item in original_rest_decisions), Fraction(0))
+            ),
+            "total_duration_beats_after": fraction_text(
+                sum((item.duration_beats for item in score.rests), Fraction(0))
+            ),
+            "fragments_before": score.rest_fragments_before,
+            "fragments_after": score.rest_fragments_after,
+            "merged": score.merged_rest_count,
+            "actions": dict(sorted(Counter(item.action for item in score.rest_decisions).items())),
+            "fragments_per_measure_voice": dict(sorted(fragments_by_stream.items())),
+        },
+        "beam_groups": len({item.group_id for item in score.beam_annotations}),
+        "beam_annotations_by_level": dict(
+            sorted(Counter(str(item.level) for item in score.beam_annotations).items())
+        ),
+        "tuplet_groups": len({item.group_id for item in score.tuplet_annotations}),
+        "hand_span_flags": dict(
+            sorted(
+                Counter(
+                    flag
+                    for diagnostic in score.hand_span_diagnostics
+                    for flag in diagnostic.threshold_flags
+                ).items()
+            )
+        ),
+        "hand_span_diagnostics": [
+            {
+                "hand": item.hand,
+                "onset_beats": fraction_text(item.onset_beats),
+                "attack_span_semitones": item.attack_span_semitones,
+                "overlap_span_semitones": item.overlap_span_semitones,
+                "threshold_flags": list(item.threshold_flags),
+                "cause": item.cause,
+            }
+            for item in score.hand_span_diagnostics
+        ],
+        "cross_staff_candidate_count": len(score.cross_staff_candidates),
+        "cross_staff_candidates": [
+            {
+                "source_index": item.source_index,
+                "hand": item.hand,
+                "pitch": item.pitch,
+                "onset_beats": fraction_text(item.onset_beats),
+                "reason": item.reason,
+            }
+            for item in score.cross_staff_candidates
+        ],
+        "ledger_line_diagnostic_count": len(score.ledger_line_diagnostics),
+        "ledger_line_pressure_by_staff": ledger_by_staff,
+        "ledger_line_diagnostics": [
+            {
+                "source_index": item.source_index,
+                "staff": item.staff,
+                "pitch": item.pitch,
+                "estimated_ledger_lines": item.estimated_ledger_lines,
+            }
+            for item in score.ledger_line_diagnostics
+        ],
+        "measure_complexity": sorted(
+            measure_complexity,
+            key=lambda item: (-int(item["complexity_score"]), int(item["measure_index"])),
+        ),
     }
 
 

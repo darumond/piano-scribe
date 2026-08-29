@@ -151,6 +151,16 @@ def test_analyze_parser_accepts_piano_layout_options() -> None:
             "61",
             "--voice-beam-size",
             "24",
+            "--engraving",
+            "refined",
+            "--voice-stability-tsv",
+            "voice-stability.tsv",
+            "--rests-tsv",
+            "rests.tsv",
+            "--beams-tsv",
+            "beams.tsv",
+            "--engraving-diagnostics-json",
+            "engraving.json",
         ]
     )
     assert args.piano_layout == "sequence"
@@ -158,3 +168,8 @@ def test_analyze_parser_accepts_piano_layout_options() -> None:
     assert args.voice_assignment_tsv == Path("voice.tsv")
     assert args.hand_split_pitch == 61
     assert args.voice_beam_size == 24
+    assert args.engraving == "refined"
+    assert args.voice_stability_tsv == Path("voice-stability.tsv")
+    assert args.rests_tsv == Path("rests.tsv")
+    assert args.beams_tsv == Path("beams.tsv")
+    assert args.engraving_diagnostics_json == Path("engraving.json")

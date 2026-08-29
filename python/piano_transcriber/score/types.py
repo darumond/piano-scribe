@@ -8,6 +8,15 @@ from enum import StrEnum
 from fractions import Fraction
 from typing import TYPE_CHECKING
 
+from piano_transcriber.engraving.types import (
+    BeamAnnotation,
+    CrossStaffCandidate,
+    HandSpanDiagnostic,
+    LedgerLineDiagnostic,
+    RestDecision,
+    TupletAnnotation,
+)
+
 if TYPE_CHECKING:
     from piano_transcriber.score.tracking import BeatTrack
 
@@ -95,6 +104,14 @@ class ScoreNote:
     next_continuity_cost: float = 0.0
     voice_duration_adjusted: bool = False
     original_duration_beats: Fraction | None = None
+    voice_identity_switched: bool = False
+    repeated_pitch_voice_switched: bool = False
+    voice_assignment_reason: str | None = None
+    extra_voice_reason: str | None = None
+    track_previous_pitch: float | None = None
+    track_direction: int = 0
+    voice_continuity_score: float = 0.0
+    duration_change_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.source_index < 0:
@@ -120,6 +137,7 @@ class ScoreNote:
             self.voice_assignment_cost,
             self.previous_continuity_cost,
             self.next_continuity_cost,
+            self.voice_continuity_score,
         )
         if any(not math.isfinite(value) or value < 0.0 for value in costs):
             raise ValueError("assignment costs must be finite and non-negative")
@@ -127,6 +145,10 @@ class ScoreNote:
             raise ValueError("hand assignment confidence must be between zero and one")
         if self.original_duration_beats is not None and self.original_duration_beats <= 0:
             raise ValueError("original duration must be positive")
+        if self.track_previous_pitch is not None and not 0 <= self.track_previous_pitch <= 127:
+            raise ValueError("track previous pitch must be between 0 and 127")
+        if self.track_direction not in {-1, 0, 1}:
+            raise ValueError("track direction must be -1, 0, or 1")
 
     @property
     def offset_beats(self) -> Fraction:
@@ -227,6 +249,14 @@ class EventDiagnostic:
     next_continuity_cost: float | None = None
     voice_duration_adjusted: bool = False
     original_duration_beats: Fraction | None = None
+    voice_identity_switched: bool = False
+    repeated_pitch_voice_switched: bool = False
+    voice_assignment_reason: str | None = None
+    extra_voice_reason: str | None = None
+    track_previous_pitch: float | None = None
+    track_direction: int = 0
+    voice_continuity_score: float | None = None
+    duration_change_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +285,20 @@ class ReconstructedScore:
     voice_evaluated_transitions: int = 0
     voice_duration_changes: int = 0
     minimum_explicit_rest_beats: Fraction = Fraction(1, 4)
+    engraving_mode: str = "basic"
+    beam_annotations: tuple[BeamAnnotation, ...] = ()
+    tuplet_annotations: tuple[TupletAnnotation, ...] = ()
+    rest_decisions: tuple[RestDecision, ...] = ()
+    hand_span_diagnostics: tuple[HandSpanDiagnostic, ...] = ()
+    cross_staff_candidates: tuple[CrossStaffCandidate, ...] = ()
+    ledger_line_diagnostics: tuple[LedgerLineDiagnostic, ...] = ()
+    voice_stability_seconds: float = 0.0
+    rest_optimizer_seconds: float = 0.0
+    engraving_annotation_seconds: float = 0.0
+    engraving_total_seconds: float = 0.0
+    rest_fragments_before: int = 0
+    rest_fragments_after: int = 0
+    merged_rest_count: int = 0
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.bpm) or self.bpm <= 0.0:

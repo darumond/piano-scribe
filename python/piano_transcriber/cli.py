@@ -14,6 +14,13 @@ import numpy as np
 from piano_transcriber.audio.loader import AudioLoadError, load_audio
 from piano_transcriber.audio.preprocessing import calculate_rms
 from piano_transcriber.config import ModelName, PipelineConfig
+from piano_transcriber.engraving.diagnostics import (
+    write_beams_tsv,
+    write_engraving_diagnostics_json,
+    write_rests_tsv,
+    write_voice_stability_tsv,
+)
+from piano_transcriber.engraving.pipeline import EngravingConfig, EngravingMode
 from piano_transcriber.midi.writer import write_score_midi
 from piano_transcriber.models.base import MissingModelDependencyError, ModelCheckpointError
 from piano_transcriber.notation.musicxml import write_score_musicxml
@@ -219,7 +226,28 @@ def _add_score_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--voice-switch-weight", type=float, default=0.65)
     parser.add_argument("--voice-chord-split-weight", type=float, default=0.2)
     parser.add_argument("--voice-secondary-weight", type=float, default=0.35)
-    parser.add_argument("--voice-additional-weight", type=float, default=1.1)
+    parser.add_argument("--voice-additional-weight", type=float, default=3.0)
+    parser.add_argument("--voice-register-weight", type=float, default=0.35)
+    parser.add_argument("--voice-contour-weight", type=float, default=0.3)
+    parser.add_argument("--voice-repeated-pitch-weight", type=float, default=2.5)
+    parser.add_argument("--voice-track-switch-weight", type=float, default=1.1)
+    parser.add_argument("--voice-inactivity-weight", type=float, default=0.15)
+    parser.add_argument("--voice-repeated-memory-beats", type=float, default=12.0)
+    parser.add_argument(
+        "--engraving",
+        choices=[item.value for item in EngravingMode],
+        default=EngravingMode.BASIC.value,
+        help="derived engraving annotation mode (default: basic)",
+    )
+    parser.add_argument(
+        "--minimum-interpretive-rest-beats",
+        default="1/2",
+        help="secondary-voice gap threshold used by refined rest notation",
+    )
+    parser.add_argument("--voice-stability-tsv", type=Path)
+    parser.add_argument("--rests-tsv", type=Path)
+    parser.add_argument("--beams-tsv", type=Path)
+    parser.add_argument("--engraving-diagnostics-json", type=Path)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -283,6 +311,7 @@ def _run_transcribe(args: argparse.Namespace) -> int:
         and not args.infer_meter
         and args.rhythm_optimizer == RhythmOptimizerMode.LOCAL.value
         and args.piano_layout == PianoLayoutMode.NONE.value
+        and args.engraving == EngravingMode.BASIC.value
     ):
         if any(
             path is not None
@@ -296,6 +325,10 @@ def _run_transcribe(args: argparse.Namespace) -> int:
                 args.rhythm_path_tsv,
                 args.staff_assignment_tsv,
                 args.voice_assignment_tsv,
+                args.voice_stability_tsv,
+                args.rests_tsv,
+                args.beams_tsv,
+                args.engraving_diagnostics_json,
             )
         ):
             raise ValueError("score diagnostics require --bpm")
@@ -386,6 +419,7 @@ def _score_config(
             voice_duration_refinement=args.voice_duration_refinement,
             duration_improvement_beats=args.voice_duration_improvement_beats,
             minimum_explicit_rest_beats=Fraction(args.minimum_explicit_rest_beats),
+            repeated_pitch_memory_beats=args.voice_repeated_memory_beats,
             hand_weights=HandAssignmentWeights(
                 register=args.hand_register_weight,
                 continuity=args.hand_continuity_weight,
@@ -405,7 +439,16 @@ def _score_config(
                 split_chord=args.voice_chord_split_weight,
                 secondary_voice=args.voice_secondary_weight,
                 additional_voice=args.voice_additional_weight,
+                register_consistency=args.voice_register_weight,
+                contour=args.voice_contour_weight,
+                repeated_pitch=args.voice_repeated_pitch_weight,
+                track_switch=args.voice_track_switch_weight,
+                inactivity=args.voice_inactivity_weight,
             ),
+        ),
+        engraving=EngravingConfig(
+            mode=EngravingMode(args.engraving),
+            minimum_interpretive_rest_beats=Fraction(args.minimum_interpretive_rest_beats),
         ),
     )
 
@@ -441,6 +484,7 @@ def _reconstruct(
                     config.piano_separation,
                     mode=PianoLayoutMode.NONE,
                 ),
+                engraving=replace(config.engraving, mode=EngravingMode.BASIC),
             )
             joint = infer_joint_meter_score(
                 result,
@@ -464,6 +508,7 @@ def _reconstruct(
             if (
                 config.rhythm_optimizer is RhythmOptimizerMode.SEQUENCE
                 or config.piano_separation.mode is PianoLayoutMode.SEQUENCE
+                or config.engraving.mode is EngravingMode.REFINED
             ):
                 selected_config = replace(
                     config,
@@ -511,9 +556,17 @@ def _write_score_outputs(
     ):
         raise ValueError("rhythm path diagnostics require --rhythm-optimizer sequence")
     if score.piano_layout == PianoLayoutMode.NONE.value and (
-        args.staff_assignment_tsv is not None or args.voice_assignment_tsv is not None
+        args.staff_assignment_tsv is not None
+        or args.voice_assignment_tsv is not None
+        or args.voice_stability_tsv is not None
     ):
         raise ValueError("staff and voice diagnostics require --piano-layout sequence")
+    if score.engraving_mode != EngravingMode.REFINED.value and (
+        args.rests_tsv is not None
+        or args.beams_tsv is not None
+        or args.engraving_diagnostics_json is not None
+    ):
+        raise ValueError("engraving diagnostics require --engraving refined")
     if args.midi is not None:
         write_score_midi(score, args.midi)
         logger.info("Wrote reconstructed MIDI to %s", args.midi)
@@ -552,6 +605,21 @@ def _write_score_outputs(
     if args.voice_assignment_tsv is not None:
         write_voice_assignment_tsv(score, args.voice_assignment_tsv)
         logger.info("Wrote voice assignment TSV to %s", args.voice_assignment_tsv)
+    if args.voice_stability_tsv is not None:
+        write_voice_stability_tsv(score, args.voice_stability_tsv)
+        logger.info("Wrote voice stability TSV to %s", args.voice_stability_tsv)
+    if args.rests_tsv is not None:
+        write_rests_tsv(score, args.rests_tsv)
+        logger.info("Wrote rest decisions TSV to %s", args.rests_tsv)
+    if args.beams_tsv is not None:
+        write_beams_tsv(score, args.beams_tsv)
+        logger.info("Wrote beam annotations TSV to %s", args.beams_tsv)
+    if args.engraving_diagnostics_json is not None:
+        write_engraving_diagnostics_json(score, args.engraving_diagnostics_json)
+        logger.info(
+            "Wrote engraving diagnostics JSON to %s",
+            args.engraving_diagnostics_json,
+        )
 
 
 def _run_analyze_score(args: argparse.Namespace) -> int:

@@ -70,7 +70,12 @@ class VoiceAssignmentWeights:
     voice_switch: float = 0.65
     split_chord: float = 0.2
     secondary_voice: float = 0.35
-    additional_voice: float = 1.1
+    additional_voice: float = 3.0
+    register_consistency: float = 0.35
+    contour: float = 0.3
+    repeated_pitch: float = 2.5
+    track_switch: float = 1.1
+    inactivity: float = 0.15
 
     def __post_init__(self) -> None:
         values = (
@@ -82,6 +87,11 @@ class VoiceAssignmentWeights:
             self.split_chord,
             self.secondary_voice,
             self.additional_voice,
+            self.register_consistency,
+            self.contour,
+            self.repeated_pitch,
+            self.track_switch,
+            self.inactivity,
         )
         if any(not math.isfinite(value) or value < 0.0 for value in values):
             raise ValueError("voice-assignment weights must be finite and non-negative")
@@ -103,6 +113,7 @@ class PianoSeparationConfig:
     voice_duration_refinement: bool = True
     duration_improvement_beats: float = 0.25
     minimum_explicit_rest_beats: Fraction = Fraction(1, 4)
+    repeated_pitch_memory_beats: float = 12.0
     hand_weights: HandAssignmentWeights = HandAssignmentWeights()
     voice_weights: VoiceAssignmentWeights = VoiceAssignmentWeights()
 
@@ -126,6 +137,8 @@ class PianoSeparationConfig:
             raise ValueError("duration improvement must be finite and non-negative")
         if self.minimum_explicit_rest_beats <= 0:
             raise ValueError("minimum explicit rest duration must be positive")
+        if self.repeated_pitch_memory_beats <= 0:
+            raise ValueError("repeated-pitch memory must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,12 +187,27 @@ class _VoiceSelection:
 
 
 @dataclass(frozen=True, slots=True)
+class VoiceTrackState:
+    """Short-lived musical voice state suitable for replacement by another tracker."""
+
+    voice_id: int
+    staff: int = 1
+    previous_pitch: float | None = None
+    previous_onset: Fraction | None = None
+    previous_duration: Fraction = Fraction(0)
+    register_center: float | None = None
+    recent_direction: int = 0
+    active_until: Fraction = Fraction(0)
+    recent_chord_participation: bool = False
+    active: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class _VoiceState:
     score: float
     selections: tuple[_VoiceSelection, ...]
-    last_pitches: tuple[float | None, ...]
-    active_until: tuple[Fraction, ...]
-    last_onsets: tuple[Fraction | None, ...]
+    tracks: tuple[VoiceTrackState, ...]
+    pitch_owners: tuple[tuple[int, int, Fraction], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +257,7 @@ def separate_piano_score(
         hand_optimizer_seconds=hand_result.elapsed_seconds,
         hand_evaluated_transitions=hand_result.evaluated_transitions,
         voice_optimizer_seconds=voice_result.elapsed_seconds,
+        voice_stability_seconds=voice_result.elapsed_seconds,
         voice_evaluated_transitions=voice_result.evaluated_transitions,
         voice_duration_changes=duration_changes,
         minimum_explicit_rest_beats=config.minimum_explicit_rest_beats,
@@ -520,10 +549,11 @@ def _assign_voices(
     for staff in (1, 2):
         staff_notes = tuple(note for note in notes if note.staff == staff)
         groups = _onset_groups(staff_notes)
-        empty_pitches = (None,) * config.maximum_voices_per_staff
-        empty_active = (Fraction(0),) * config.maximum_voices_per_staff
-        empty_onsets: tuple[Fraction | None, ...] = (None,) * config.maximum_voices_per_staff
-        beam = [_VoiceState(0.0, (), empty_pitches, empty_active, empty_onsets)]
+        tracks = tuple(
+            VoiceTrackState(voice_id, staff=staff)
+            for voice_id in range(1, config.maximum_voices_per_staff + 1)
+        )
+        beam = [_VoiceState(0.0, (), tracks)]
         for group in groups:
             candidates = _voice_candidates(group, config)
             next_beam: list[_VoiceState] = []
@@ -531,19 +561,21 @@ def _assign_voices(
                 for candidate in candidates:
                     transition = _voice_transition_cost(state, group, candidate, config)
                     evaluated += 1
-                    pitches, active, onsets = _updated_voice_state(state, group, candidate)
+                    updated_tracks, owners = _updated_voice_state(state, group, candidate, config)
                     next_beam.append(
                         _VoiceState(
                             state.score + candidate.local_cost + transition,
                             (*state.selections, _VoiceSelection(group, candidate, transition)),
-                            pitches,
-                            active,
-                            onsets,
+                            updated_tracks,
+                            owners,
                         )
                     )
             beam = sorted(next_beam, key=_voice_state_key)[: config.voice_beam_size]
         best = beam[0]
+        pitch_owners: dict[int, tuple[int, Fraction]] = {}
+        track_pitches: dict[int, float] = {}
         for selection in best.selections:
+            previous_track_pitches = dict(track_pitches)
             per_note_cost = (selection.candidate.local_cost + selection.transition_cost) / len(
                 selection.group.notes
             )
@@ -552,12 +584,62 @@ def _assign_voices(
                 selection.candidate.assignments,
                 strict=True,
             ):
+                owner = pitch_owners.get(note.pitch)
+                owner_is_recent = owner is not None and (
+                    float(note.onset_beats - owner[1]) <= config.repeated_pitch_memory_beats
+                )
+                repeated_switch = owner_is_recent and owner is not None and owner[0] != voice
+                previous_pitch = previous_track_pitches.get(voice)
+                nearest_track = min(
+                    (
+                        (abs(note.pitch - pitch), track_voice)
+                        for track_voice, pitch in previous_track_pitches.items()
+                    ),
+                    default=None,
+                )
+                identity_switch = (
+                    previous_pitch is not None
+                    and nearest_track is not None
+                    and nearest_track[1] != voice
+                    and nearest_track[0] + 3 < abs(note.pitch - previous_pitch)
+                )
+                direction = (
+                    _motion_direction(note.pitch - previous_pitch)
+                    if previous_pitch is not None
+                    else 0
+                )
+                continuity = (
+                    config.voice_weights.continuity * abs(note.pitch - previous_pitch) / 12.0
+                    if previous_pitch is not None
+                    else 0.0
+                )
+                reason = "track-continuity"
+                if repeated_switch:
+                    reason = "repeated-pitch-reassignment"
+                elif identity_switch:
+                    reason = "neighbor-track-exchange"
+                elif owner_is_recent and owner is not None and owner[0] == voice:
+                    reason = "repeated-pitch-continuity"
                 replacements[note.source_index] = replace(
                     note,
                     voice=voice,
                     voice_assignment_cost=max(0.0, per_note_cost),
+                    voice_identity_switched=identity_switch,
+                    repeated_pitch_voice_switched=repeated_switch,
+                    voice_assignment_reason=reason,
+                    track_previous_pitch=previous_pitch,
+                    track_direction=direction,
+                    voice_continuity_score=continuity,
                 )
+                pitch_owners[note.pitch] = (voice, note.onset_beats)
+            track_pitches.update(_voice_representatives(selection.group, selection.candidate))
     assigned = tuple(replacements[note.source_index] for note in notes)
+    assigned = _collapse_unnecessary_extra_voices(
+        assigned,
+        config.preferred_voices_per_staff,
+    )
+    assigned = _refresh_voice_diagnostics(assigned, config)
+    assigned = _add_extra_voice_reasons(assigned, config.preferred_voices_per_staff)
     return _AssignmentResult(assigned, time.perf_counter() - started, evaluated)
 
 
@@ -611,12 +693,19 @@ def _voice_transition_cost(
     cost = 0.0
     for voice, current in representatives.items():
         index = voice - 1
-        previous = state.last_pitches[index]
+        track = state.tracks[index]
+        previous = track.previous_pitch
         if previous is None and 1 < voice <= config.preferred_voices_per_staff:
             cost += config.voice_weights.secondary_voice * (voice - 1)
         if previous is not None:
             distance = abs(current - previous)
             cost += config.voice_weights.continuity * distance / 12.0
+            if track.register_center is not None:
+                cost += (
+                    config.voice_weights.register_consistency
+                    * abs(current - track.register_center)
+                    / 12.0
+                )
             if distance > config.large_jump_semitones:
                 cost += (
                     config.voice_weights.large_jump
@@ -624,17 +713,27 @@ def _voice_transition_cost(
                     / 12.0
                 )
             other_distances = [
-                abs(current - pitch)
-                for other_index, pitch in enumerate(state.last_pitches)
-                if other_index != index and pitch is not None
+                abs(current - other.previous_pitch)
+                for other_index, other in enumerate(state.tracks)
+                if other_index != index and other.previous_pitch is not None
             ]
             if other_distances and min(other_distances) + 3 < distance:
                 cost += (
                     config.voice_weights.voice_switch * (distance - min(other_distances) - 3) / 12.0
                 )
-        if state.active_until[index] > group.onset and state.last_onsets[index] != group.onset:
-            overlap = float(state.active_until[index] - group.onset)
-            cost += config.voice_weights.overlap * (1.0 + min(overlap, 2.0) / 2.0)
+            direction = _motion_direction(current - previous)
+            if (
+                direction != 0
+                and track.recent_direction != 0
+                and direction != track.recent_direction
+            ):
+                cost += config.voice_weights.contour * min(1.0, distance / 12.0)
+            if track.previous_onset is not None:
+                gap = float(group.onset - track.previous_onset)
+                cost += config.voice_weights.inactivity * min(2.0, gap / 4.0)
+        if track.active_until > group.onset and track.previous_onset != group.onset:
+            overlap = float(track.active_until - group.onset)
+            cost += config.voice_weights.overlap * (4.0 + min(overlap, 2.0) / 2.0)
     if 1 in representatives and 2 in representatives and representatives[1] < representatives[2]:
         cost += config.voice_weights.crossing * (
             1.0 + (representatives[2] - representatives[1]) / 12.0
@@ -658,7 +757,16 @@ def _voice_transition_cost(
             )
             if previous_assignments[closest.source_index] != voice:
                 similarity = max(0.15, 1.0 - abs(closest.pitch - note.pitch) / 12.0)
-                cost += config.voice_weights.voice_switch * similarity
+                cost += config.voice_weights.track_switch * similarity
+    owners = {pitch: (voice, onset) for pitch, voice, onset in state.pitch_owners}
+    for note, voice in zip(group.notes, candidate.assignments, strict=True):
+        owner = owners.get(note.pitch)
+        if (
+            owner is not None
+            and owner[0] != voice
+            and float(group.onset - owner[1]) <= config.repeated_pitch_memory_beats
+        ):
+            cost += config.voice_weights.repeated_pitch
     return cost
 
 
@@ -673,21 +781,50 @@ def _updated_voice_state(
     state: _VoiceState,
     group: _OnsetGroup,
     candidate: _VoiceCandidate,
-) -> tuple[tuple[float | None, ...], tuple[Fraction, ...], tuple[Fraction | None, ...]]:
-    pitches = list(state.last_pitches)
-    active = list(state.active_until)
-    onsets = list(state.last_onsets)
+    config: PianoSeparationConfig,
+) -> tuple[tuple[VoiceTrackState, ...], tuple[tuple[int, int, Fraction], ...]]:
+    tracks = [replace(track, active=track.active_until > group.onset) for track in state.tracks]
     representatives = _voice_representatives(group, candidate)
     for voice, representative in representatives.items():
         index = voice - 1
-        pitches[index] = representative
-        active[index] = max(
-            note.offset_beats
+        previous = tracks[index]
+        assigned_notes = tuple(
+            note
             for note, assigned in zip(group.notes, candidate.assignments, strict=True)
             if assigned == voice
         )
-        onsets[index] = group.onset
-    return tuple(pitches), tuple(active), tuple(onsets)
+        active_until = max(note.offset_beats for note in assigned_notes)
+        direction = (
+            _motion_direction(representative - previous.previous_pitch)
+            if previous.previous_pitch is not None
+            else 0
+        )
+        register = (
+            representative
+            if previous.register_center is None
+            else previous.register_center * 0.7 + representative * 0.3
+        )
+        tracks[index] = VoiceTrackState(
+            voice_id=voice,
+            staff=previous.staff,
+            previous_pitch=representative,
+            previous_onset=group.onset,
+            previous_duration=max(note.duration_beats for note in assigned_notes),
+            register_center=register,
+            recent_direction=direction or previous.recent_direction,
+            active_until=active_until,
+            recent_chord_participation=len(assigned_notes) > 1,
+            active=True,
+        )
+    owners = {
+        pitch: (voice, onset)
+        for pitch, voice, onset in state.pitch_owners
+        if float(group.onset - onset) <= config.repeated_pitch_memory_beats
+    }
+    for note, voice in zip(group.notes, candidate.assignments, strict=True):
+        owners[note.pitch] = (voice, group.onset)
+    encoded = tuple(sorted((pitch, voice, onset) for pitch, (voice, onset) in owners.items()))
+    return tuple(tracks), encoded
 
 
 def _voice_state_key(state: _VoiceState) -> tuple[float, tuple[tuple[int, ...], ...]]:
@@ -695,6 +832,221 @@ def _voice_state_key(state: _VoiceState) -> tuple[float, tuple[tuple[int, ...], 
         state.score,
         tuple(selection.candidate.assignments for selection in state.selections),
     )
+
+
+def _motion_direction(delta: float) -> int:
+    return 1 if delta > 0 else -1 if delta < 0 else 0
+
+
+def _collapse_unnecessary_extra_voices(
+    notes: tuple[ScoreNote, ...],
+    preferred_voice_count: int,
+) -> tuple[ScoreNote, ...]:
+    replacements = {note.source_index: note for note in notes}
+    keys = sorted(
+        {
+            (note.staff, note.onset_beats, note.voice)
+            for note in notes
+            if note.voice > preferred_voice_count
+        }
+    )
+    for staff, onset, extra_voice in keys:
+        current_notes = tuple(replacements.values())
+        group = tuple(
+            note
+            for note in current_notes
+            if note.staff == staff and note.onset_beats == onset and note.voice == extra_voice
+        )
+        if not group:
+            continue
+        candidates = [
+            voice
+            for voice in range(1, preferred_voice_count + 1)
+            if not _voice_group_conflicts(group, voice, current_notes)
+        ]
+        if not candidates:
+            continue
+        representative = statistics.mean(note.pitch for note in group)
+        target = min(
+            candidates,
+            key=lambda voice: (
+                _neighboring_voice_distance(
+                    representative,
+                    onset,
+                    voice,
+                    staff,
+                    current_notes,
+                    excluded={note.source_index for note in group},
+                ),
+                voice,
+            ),
+        )
+        current_distance = _neighboring_voice_distance(
+            representative,
+            onset,
+            extra_voice,
+            staff,
+            current_notes,
+            excluded={note.source_index for note in group},
+        )
+        target_distance = _neighboring_voice_distance(
+            representative,
+            onset,
+            target,
+            staff,
+            current_notes,
+            excluded={note.source_index for note in group},
+        )
+        if target_distance > current_distance + 12.0:
+            continue
+        for note in group:
+            replacements[note.source_index] = replace(
+                note,
+                voice=target,
+                voice_assignment_reason="preferred-voice-collapse",
+                extra_voice_reason=None,
+            )
+    return tuple(replacements[note.source_index] for note in notes)
+
+
+def _voice_group_conflicts(
+    group: tuple[ScoreNote, ...],
+    voice: int,
+    notes: tuple[ScoreNote, ...],
+) -> bool:
+    sources = {note.source_index for note in group}
+    return any(
+        other.source_index not in sources
+        and other.staff == group[0].staff
+        and other.voice == voice
+        and other.onset_beats != group[0].onset_beats
+        and any(
+            note.onset_beats < other.offset_beats and other.onset_beats < note.offset_beats
+            for note in group
+        )
+        for other in notes
+    )
+
+
+def _neighboring_voice_distance(
+    pitch: float,
+    onset: Fraction,
+    voice: int,
+    staff: int,
+    notes: tuple[ScoreNote, ...],
+    *,
+    excluded: set[int],
+) -> float:
+    candidates = tuple(
+        note
+        for note in notes
+        if note.source_index not in excluded and note.staff == staff and note.voice == voice
+    )
+    previous = max(
+        (note for note in candidates if note.onset_beats < onset),
+        key=lambda note: (note.onset_beats, note.source_index),
+        default=None,
+    )
+    following = min(
+        (note for note in candidates if note.onset_beats > onset),
+        key=lambda note: (note.onset_beats, note.source_index),
+        default=None,
+    )
+    distances = [abs(pitch - note.pitch) for note in (previous, following) if note is not None]
+    return statistics.mean(distances) if distances else 0.0
+
+
+def _refresh_voice_diagnostics(
+    notes: tuple[ScoreNote, ...],
+    config: PianoSeparationConfig,
+) -> tuple[ScoreNote, ...]:
+    replacements: dict[int, ScoreNote] = {}
+    for staff in (1, 2):
+        pitch_owners: dict[int, tuple[int, Fraction]] = {}
+        track_pitches: dict[int, float] = {}
+        for group in _onset_groups(tuple(note for note in notes if note.staff == staff)):
+            previous_track_pitches = dict(track_pitches)
+            by_voice: dict[int, list[int]] = {}
+            for note in group.notes:
+                owner = pitch_owners.get(note.pitch)
+                owner_is_recent = owner is not None and (
+                    float(note.onset_beats - owner[1]) <= config.repeated_pitch_memory_beats
+                )
+                repeated_switch = owner_is_recent and owner is not None and owner[0] != note.voice
+                previous_pitch = previous_track_pitches.get(note.voice)
+                nearest_track = min(
+                    (
+                        (abs(note.pitch - pitch), track_voice)
+                        for track_voice, pitch in previous_track_pitches.items()
+                    ),
+                    default=None,
+                )
+                identity_switch = (
+                    previous_pitch is not None
+                    and nearest_track is not None
+                    and nearest_track[1] != note.voice
+                    and nearest_track[0] + 3 < abs(note.pitch - previous_pitch)
+                )
+                reason = note.voice_assignment_reason or "track-continuity"
+                if repeated_switch:
+                    reason = "repeated-pitch-reassignment"
+                elif identity_switch:
+                    reason = "neighbor-track-exchange"
+                elif owner_is_recent and owner is not None and owner[0] == note.voice:
+                    reason = "repeated-pitch-continuity"
+                direction = (
+                    _motion_direction(note.pitch - previous_pitch)
+                    if previous_pitch is not None
+                    else 0
+                )
+                continuity = (
+                    config.voice_weights.continuity * abs(note.pitch - previous_pitch) / 12.0
+                    if previous_pitch is not None
+                    else 0.0
+                )
+                replacements[note.source_index] = replace(
+                    note,
+                    voice_identity_switched=identity_switch,
+                    repeated_pitch_voice_switched=repeated_switch,
+                    voice_assignment_reason=reason,
+                    track_previous_pitch=previous_pitch,
+                    track_direction=direction,
+                    voice_continuity_score=continuity,
+                )
+                pitch_owners[note.pitch] = (note.voice, note.onset_beats)
+                by_voice.setdefault(note.voice, []).append(note.pitch)
+            track_pitches.update(
+                {voice: statistics.mean(pitches) for voice, pitches in by_voice.items()}
+            )
+    return tuple(replacements[note.source_index] for note in notes)
+
+
+def _add_extra_voice_reasons(
+    notes: tuple[ScoreNote, ...], preferred_voice_count: int
+) -> tuple[ScoreNote, ...]:
+    replacements: dict[int, ScoreNote] = {}
+    for note in notes:
+        if note.voice <= preferred_voice_count:
+            replacements[note.source_index] = note
+            continue
+        preferred = tuple(
+            other
+            for other in notes
+            if other.staff == note.staff and other.voice <= preferred_voice_count
+        )
+        if any(
+            other.onset_beats != note.onset_beats
+            and note.onset_beats < other.offset_beats
+            and other.onset_beats < note.offset_beats
+            for other in preferred
+        ):
+            reason = "overlap-required"
+        elif any(other.onset_beats == note.onset_beats for other in preferred):
+            reason = "chord-decomposition"
+        else:
+            reason = "voice-leading"
+        replacements[note.source_index] = replace(note, extra_voice_reason=reason)
+    return tuple(replacements[note.source_index] for note in notes)
 
 
 def _refine_voice_durations(
@@ -773,6 +1125,7 @@ def _refine_voice_durations(
             duration_beats=selected,
             voice_duration_adjusted=True,
             original_duration_beats=note.duration_beats,
+            duration_change_reason="raw-release-supported-overlap-extension",
         )
         changed += 1
     return tuple(replacements[note.source_index] for note in notes), changed
@@ -875,4 +1228,12 @@ def _assignment_diagnostic(
         next_continuity_cost=note.next_continuity_cost,
         voice_duration_adjusted=note.voice_duration_adjusted,
         original_duration_beats=note.original_duration_beats,
+        voice_identity_switched=note.voice_identity_switched,
+        repeated_pitch_voice_switched=note.repeated_pitch_voice_switched,
+        voice_assignment_reason=note.voice_assignment_reason,
+        extra_voice_reason=note.extra_voice_reason,
+        track_previous_pitch=note.track_previous_pitch,
+        track_direction=note.track_direction,
+        voice_continuity_score=note.voice_continuity_score,
+        duration_change_reason=note.duration_change_reason,
     )

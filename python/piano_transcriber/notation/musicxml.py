@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from fractions import Fraction
 from math import lcm
 from pathlib import Path
+from time import perf_counter
 
 from piano_transcriber.score.beats import locate_score_measure
 from piano_transcriber.score.quantize import WRITTEN_DURATIONS
@@ -14,6 +16,8 @@ from piano_transcriber.score.types import ReconstructedScore, ScoreNote, ScoreRe
 from piano_transcriber.transcription.types import NoteEvent, TranscriptionResult
 
 _SPLIT_DURATIONS = tuple(sorted((*WRITTEN_DURATIONS, Fraction(1, 24), Fraction(1, 48))))
+
+logger = logging.getLogger(__name__)
 
 _PITCHES: tuple[tuple[str, int], ...] = (
     ("C", 0),
@@ -212,6 +216,8 @@ def _append_score_note(
     *,
     divisions: int,
     chord: bool,
+    beams: tuple[tuple[int, str], ...] = (),
+    tuplets: tuple[tuple[int, str], ...] = (),
 ) -> None:
     element = ET.SubElement(measure, "note")
     if chord:
@@ -228,16 +234,20 @@ def _append_score_note(
         modification = ET.SubElement(element, "time-modification")
         ET.SubElement(modification, "actual-notes").text = str(actual)
         ET.SubElement(modification, "normal-notes").text = str(normal)
+    for level, value in beams:
+        ET.SubElement(element, "beam", number=str(level)).text = value
     if segment.tie_stop:
         ET.SubElement(element, "tie", type="stop")
     if segment.tie_start:
         ET.SubElement(element, "tie", type="start")
-    if segment.tie_start or segment.tie_stop:
+    if segment.tie_start or segment.tie_stop or tuplets:
         notations = ET.SubElement(element, "notations")
         if segment.tie_stop:
             ET.SubElement(notations, "tied", type="stop")
         if segment.tie_start:
             ET.SubElement(notations, "tied", type="start")
+        for number, value in tuplets:
+            ET.SubElement(notations, "tuplet", number=str(number), type=value)
     ET.SubElement(element, "staff").text = str(segment.note.staff)
 
 
@@ -265,6 +275,7 @@ def _append_score_rest(
 
 def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
     """Serialize an exact reconstructed score with measures and chord semantics."""
+    started = perf_counter()
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     segments = _segments(score)
@@ -291,6 +302,27 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
     rests_by_measure: dict[int, list[_RestSegment]] = {}
     for rest_segment in rest_segments:
         rests_by_measure.setdefault(rest_segment.measure_index, []).append(rest_segment)
+    beam_lookup: dict[tuple[int, Fraction, int, int], list[tuple[int, str]]] = {}
+    for beam_annotation in score.beam_annotations:
+        beam_key = (
+            beam_annotation.measure_index,
+            beam_annotation.onset_in_measure,
+            beam_annotation.staff,
+            beam_annotation.voice,
+        )
+        beam_lookup.setdefault(beam_key, []).append((beam_annotation.level, beam_annotation.value))
+    tuplet_lookup: dict[tuple[int, Fraction, int, int, int], list[tuple[int, str]]] = {}
+    for tuplet_annotation in score.tuplet_annotations:
+        tuplet_annotation_key = (
+            tuplet_annotation.measure_index,
+            tuplet_annotation.onset_in_measure,
+            tuplet_annotation.staff,
+            tuplet_annotation.voice,
+            tuplet_annotation.source_index,
+        )
+        tuplet_lookup.setdefault(tuplet_annotation_key, []).append(
+            (tuplet_annotation.group_id, tuplet_annotation.value)
+        )
     staff_count = (
         2 if score.piano_layout != "none" else max((note.staff for note in score.notes), default=1)
     )
@@ -346,6 +378,8 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
             ET.SubElement(metronome, "per-minute").text = f"{nearest.bpm:g}"
             ET.SubElement(direction, "sound", tempo=f"{nearest.bpm:g}")
 
+        _append_pedal_directions(measure, score, measure_index, divisions)
+
         measure_segments = by_measure.get(measure_index, [])
         current_measure_beats = (
             score.pickup_beats if is_pickup else score.time_signature.measure_beats
@@ -388,11 +422,20 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
                     key=lambda item: (-item.duration, item.note.pitch),
                 )
                 for index, note_segment in enumerate(ordered):
+                    annotation_key = (
+                        measure_index,
+                        note_segment.onset_in_measure,
+                        note_segment.note.staff,
+                        note_segment.note.voice,
+                    )
+                    tuplet_key = (*annotation_key, note_segment.note.source_index)
                     _append_score_note(
                         measure,
                         note_segment,
                         divisions=divisions,
                         chord=index > 0,
+                        beams=tuple(sorted(beam_lookup.get(annotation_key, ()))),
+                        tuplets=tuple(sorted(tuplet_lookup.get(tuplet_key, ()))),
                     )
                 if ordered:
                     cursor_ticks = max(
@@ -406,4 +449,40 @@ def write_score_musicxml(score: ReconstructedScore, path: str | Path) -> Path:
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ")
     tree.write(output_path, encoding="utf-8", xml_declaration=True)
+    logger.info(
+        "Wrote reconstructed MusicXML in %.3f s to %s",
+        perf_counter() - started,
+        output_path,
+    )
     return output_path
+
+
+def _append_pedal_directions(
+    measure: ET.Element,
+    score: ReconstructedScore,
+    measure_index: int,
+    divisions: int,
+) -> None:
+    events: list[tuple[Fraction, str]] = []
+    for interval in score.pedal_intervals:
+        start_measure, start_local, _start_length = locate_score_measure(
+            interval.onset_beats,
+            score.time_signature,
+            score.pickup_beats,
+        )
+        stop_measure, stop_local, _stop_length = locate_score_measure(
+            interval.offset_beats,
+            score.time_signature,
+            score.pickup_beats,
+        )
+        if start_measure == measure_index:
+            events.append((start_local, "start"))
+        if stop_measure == measure_index:
+            events.append((stop_local, "stop"))
+    for offset, value in sorted(events, key=lambda item: (item[0], item[1] == "start")):
+        direction = ET.SubElement(measure, "direction", placement="below")
+        direction_type = ET.SubElement(direction, "direction-type")
+        ET.SubElement(direction_type, "pedal", type=value, line="yes")
+        if offset:
+            ET.SubElement(direction, "offset").text = str(int(offset * divisions))
+        ET.SubElement(direction, "staff").text = "2" if score.piano_layout != "none" else "1"

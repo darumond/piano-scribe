@@ -7,6 +7,7 @@ import math
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 
+from piano_transcriber.engraving.pipeline import EngravingConfig, apply_engraving
 from piano_transcriber.score.beats import required_score_measures
 from piano_transcriber.score.chords import group_chords
 from piano_transcriber.score.quantize import (
@@ -55,6 +56,7 @@ class ReconstructionConfig:
     rhythm_optimizer: RhythmOptimizerMode = RhythmOptimizerMode.LOCAL
     rhythm_sequence: RhythmSequenceConfig = field(default_factory=RhythmSequenceConfig)
     piano_separation: PianoSeparationConfig = field(default_factory=PianoSeparationConfig)
+    engraving: EngravingConfig = field(default_factory=EngravingConfig)
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.bpm) or self.bpm <= 0.0:
@@ -579,7 +581,8 @@ def reconstruct_score(
             rhythm_result.evaluated_transitions if rhythm_result is not None else 0
         ),
     )
-    return separate_piano_score(base_score, config.piano_separation)
+    separated = separate_piano_score(base_score, config.piano_separation)
+    return apply_engraving(separated, config.engraving)
 
 
 def _score_alignment(

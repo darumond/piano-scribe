@@ -1,5 +1,6 @@
 """Symbolic score reconstruction independent from transcription backends."""
 
+from piano_transcriber.engraving.pipeline import EngravingConfig, EngravingMode, apply_engraving
 from piano_transcriber.score.meter import (
     JointMeterConfig,
     JointMeterResult,
@@ -36,6 +37,8 @@ from piano_transcriber.score.types import (
 __all__ = [
     "BeatTrack",
     "BeatTracker",
+    "EngravingConfig",
+    "EngravingMode",
     "HandAssignmentWeights",
     "JointMeterConfig",
     "JointMeterResult",
@@ -55,6 +58,7 @@ __all__ = [
     "SymbolicOnsetBeatTracker",
     "TimeSignature",
     "VoiceAssignmentWeights",
+    "apply_engraving",
     "infer_joint_meter_score",
     "reconstruct_score",
     "separate_piano_score",

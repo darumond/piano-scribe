@@ -258,8 +258,10 @@ Default hand weights are register `0.55`, continuity `0.75`, large jump `0.85`, 
 crossing `1.6`, compact-chord split `0.8`, wide span `1.0`, and excess hand load `0.25`. Default
 voice weights are continuity `0.8`, large jump `0.55`, overlap `3.0`, crossing `1.2`, identity
 switch `0.65`, chord split `0.2`, first use of the secondary voice `0.35`, and additional voices
-`1.1`. Each is configurable through its corresponding `--hand-*-weight` or `--voice-*-weight`
-option; they are generic priors rather than composition-specific settings.
+`3.0`. Persistent-track evidence adds register consistency `0.35`, contour continuity `0.3`,
+repeated-pitch ownership `2.5`, neighboring-track exchange `1.1`, and inactivity `0.15`. Each is
+configurable through its corresponding `--hand-*-weight` or `--voice-*-weight` option; they are
+generic priors rather than composition-specific settings.
 
 Within each staff, a second beam assigns coherent voices using pitch continuity, active written
 durations, chord membership, overlap, crossing, voice-switch, and additional-voice costs. Two voices
@@ -280,6 +282,44 @@ duration, chord identity, assignments, costs, confidence, continuity evidence, t
 voice-aware duration changes. JSON diagnostics also summarize hand/staff counts, voice counts and
 switches, crossings, melodic intervals, hand spans, split chords, explicit rests, search sizes, and
 optimizer runtimes.
+
+### Engraving refinement
+
+Engraving is a derived pass after rhythm, hands, staves, and musical voices. The default
+`--engraving basic` preserves the previous output. Select `--engraving refined` to simplify
+voice-specific rest padding, group conventional beams, span compatible triplets, emit sustain-pedal
+directions, and calculate non-mutating hand-span, cross-staff-candidate, and ledger-line diagnostics:
+
+```bash
+piano-scribe analyze-score transcription.json \
+  --infer-meter \
+  --rhythm-optimizer sequence \
+  --piano-layout sequence \
+  --engraving refined \
+  --midi score.mid \
+  --musicxml score.musicxml \
+  --voice-stability-tsv voice-stability.tsv \
+  --rests-tsv rests.tsv \
+  --beams-tsv beams.tsv \
+  --engraving-diagnostics-json engraving-diagnostics.json
+```
+
+Voice tracks retain staff, pitch, onset, duration, register, contour, activity, and recent chord
+state. Repeated-pitch ownership is remembered for 12 beats by default and can be tuned with
+`--voice-repeated-memory-beats`. Diagnostics distinguish general track exchanges from repeated-pitch
+voice changes and explain any remaining use of voices 3–4. Every voice-aware duration adjustment
+records its reason while preserving the raw acoustic times.
+
+Refined beaming supports eighth, sixteenth, and thirty-second levels, including mixed groups. It
+groups by quarter-note pulse in simple meters, two dotted-quarter pulses in 6/8, and dotted-half
+pulses in 6/4, never crossing measures or rests. Triplet spans add MusicXML `time-modification` and
+tuplet start/stop notation without changing the selected quantization. Pedal intervals become basic
+start/stop line directions; half-pedaling remains outside the format.
+
+The engraving report records rests and serialized fragments before and after simplification, beam
+and tuplet groups, separate attack and sustained-overlap hand spans at 12-, 16-, and 20-semitone
+thresholds, low/high cross-staff candidates, ledger-line pressure, and pass runtimes. Cross-staff
+notation and dynamic clef changes are diagnostic-only in this phase.
 
 Very short acoustic events are retained by default and receive a suspicious-event diagnostic.
 Use `--min-note-duration-ms 30` to opt into filtering; every filtered or merged event remains in the
@@ -370,6 +410,7 @@ python/piano_transcriber/    Installable Python package
   models/                    Backend interface and adapters
   transcription/             Domain types, postprocessing, pipeline
   score/                     Rhythm, piano layout, chords, voices, rests, and diagnostics
+  engraving/                 Derived rest, beam, tuplet, and layout annotations
   midi/                      MIDI serialization
   notation/                  MusicXML serialization
 tests/unit/                  Focused Python tests

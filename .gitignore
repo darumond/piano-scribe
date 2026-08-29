@@ -32,6 +32,7 @@ compile_commands.json
 
 # Local work and generated application output
 work/
+tmp/
 outputs/
 test_audio/
 *.mid
