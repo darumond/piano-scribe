@@ -13,6 +13,7 @@ authors = [{ name = "PianoScribe contributors" }]
 dependencies = [
     "mido>=1.3,<2",
     "numpy>=1.26,<3",
+    "PyYAML>=6,<7",
     "scipy>=1.12,<2",
     "soundfile>=0.12,<1",
 ]
@@ -62,5 +63,5 @@ mypy_path = "python"
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["mido", "soundfile", "scipy.*", "basic_pitch.*", "piano_transcription_inference.*"]
+module = ["mido", "soundfile", "scipy.*", "basic_pitch.*", "piano_transcription_inference.*", "yaml"]
 ignore_missing_imports = true

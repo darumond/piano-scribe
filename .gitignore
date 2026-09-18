@@ -35,6 +35,10 @@ work/
 tmp/
 outputs/
 test_audio/
+references/
+evaluation_reports/
+*.mxl
+*.pdf
 *.mid
 *.midi
 *.musicxml

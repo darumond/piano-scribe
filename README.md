@@ -371,6 +371,26 @@ piano-scribe inspect input.wav
 The command prints sample rate, duration, channel count, RMS, and peak amplitude. Use `--verbose`
 before the subcommand for detailed logs.
 
+## Evaluation
+
+Compare cached MIDI, MusicXML, raw transcription JSON, or score diagnostics against a reference:
+
+```bash
+piano-scribe evaluate --prediction outputs/example/score.musicxml \
+  --reference references/example.musicxml --prediction-voice-scope staff \
+  --json outputs/evaluation/example.json --table outputs/evaluation/example.tsv
+piano-scribe evaluate-suite evaluation.example.yaml --json outputs/evaluation/suite.json
+piano-scribe compare-evaluations outputs/evaluation/old.json outputs/evaluation/new.json
+```
+
+The independent evaluation package reports note/timing, pitch, rhythm, meter, staff, hand,
+permutation-invariant voice, chord and structural dimensions. Missing metadata is unavailable,
+not a failure. Suites use cached outputs and report pending references explicitly.
+See [the evaluation guide](docs/evaluation.md) for metric definitions, alignment assumptions,
+manifest format, synthetic benchmarks and preparation of local references.
+Good transcription F1 does not imply good notation; structural simplicity does not imply
+score correctness. Local reference material and generated reports remain ignored.
+
 ## Development and testing
 
 Run all Python checks:

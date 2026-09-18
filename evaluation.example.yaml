@@ -1,0 +1,10 @@
+# Paths are relative to this manifest. Fill in a legally obtained reference.
+pieces:
+  - id: example-01
+    audio: test_audio/example-01.wav
+    reference: null
+    prediction_voice_scope: staff
+    predictions:
+      transcription: outputs/example-01/transcription.json
+      reconstruction: outputs/example-01/diagnostics.json
+      final-score: outputs/example-01/score.musicxml

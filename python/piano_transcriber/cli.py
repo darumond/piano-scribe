@@ -21,6 +21,7 @@ from piano_transcriber.engraving.diagnostics import (
     write_voice_stability_tsv,
 )
 from piano_transcriber.engraving.pipeline import EngravingConfig, EngravingMode
+from piano_transcriber.evaluation.cli import register_commands
 from piano_transcriber.midi.writer import write_score_midi
 from piano_transcriber.models.base import MissingModelDependencyError, ModelCheckpointError
 from piano_transcriber.notation.musicxml import write_score_musicxml
@@ -291,6 +292,7 @@ def _parser() -> argparse.ArgumentParser:
     inspect = subparsers.add_parser("inspect", help="show audio metadata and levels")
     inspect.add_argument("input", type=Path)
     inspect.set_defaults(handler=_run_inspect)
+    register_commands(subparsers)
     return parser
 
 
